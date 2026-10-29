@@ -205,6 +205,7 @@ impl InferenceService {
                         let mut ready = pb::RunInferenceRunReady {
                             resolved_model: Some(model.clone()),
                             accepts_client_heartbeat: true,
+                            accepts_agent_events: true,
                             accepts_aborted_finish: true,
                             accepts_subagent_model_resolution: true,
                             ..Default::default()
@@ -313,11 +314,11 @@ impl InferenceService {
                             ),
                         )?;
                     }
+                    Some(M::AgentEvent(event)) => {
+                        tracing::debug!(%request_id, method = %event.method_name, "received Cursor agent event");
+                    }
                     Some(
-                        M::ClientHeartbeat(_)
-                        | M::AgentEvent(_)
-                        | M::RunRequestLog(_)
-                        | M::ClientFirstCallTimings(_),
+                        M::ClientHeartbeat(_) | M::RunRequestLog(_) | M::ClientFirstCallTimings(_),
                     ) => {}
                     Some(M::DeltaBaseSeed(_)) => {
                         return Err(Error::Protocol(

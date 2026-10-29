@@ -21,7 +21,7 @@ use crate::{
         },
         services::{
             account, analytics, commit_message, compatibility, entitlement::FreeEntitlementCache,
-            knowledge, model_catalog, server_config, tab,
+            inference_telemetry, knowledge, model_catalog, server_config, tab,
         },
         transport::{TransportParent, TransportRegistry},
     },
@@ -53,6 +53,14 @@ fn router_with_proxy(
             post(super::inference::stream),
         )
         .route("/aiserver.v1.BidiService/BidiAppend", post(bidi_handler))
+        .route(
+            inference_telemetry::FOLLOWUP_PATH,
+            post(inference_telemetry::record),
+        )
+        .route(
+            inference_telemetry::POST_TURN_PATH,
+            post(inference_telemetry::record),
+        )
         .route(
             "/aiserver.v1.AiService/AvailableDocs",
             post(compatibility::available_docs),

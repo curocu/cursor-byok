@@ -1,6 +1,6 @@
 # Cursor 3.27.22 Windows 适配与构建
 
-适配版本：Cursor 3.27.22；桌面包版本：1.0.4。
+适配版本：Cursor 3.27.22；桌面包版本：1.0.5。
 
 ## 修复范围
 
@@ -19,19 +19,26 @@ Cursor 的本地 Agent 循环通过 `InferenceService/RunInferenceSSE` 和共享
 握手补齐 Agent、Ask、Plan、Debug、Triage、Multitask 的模式配置，
 以及配置中的子 Agent 模型与覆盖策略。
 
+1.0.5 另外补齐可选后台记录：本地模型的 follow-up 分类和 post-turn 标注
+在本地返回空应答，不执行官方分类算法，也不把本地模型 hash 发给官方服务；
+官方模型仍转发原请求。握手明确声明 `all-static` 工具布局，并接收 Agent 事件。
+
 ## 已验证范围
 
-- Rust 单元与协议测试：180 项通过。
+- Rust 单元与协议测试：181 项通过。
 - 三种 Provider 的本地 HTTP 契约测试：3 项通过；包含工具循环与推理状态回传。
 - 真实代理链路：Chat Completions 与 Responses 各携带 20 个 Cursor 工具，
   完成工具调用、工具结果回传、第二轮回复。
-- Cursor 界面中的普通 Agent 曾完成实际回复；修复后的多 Agent 界面操作仍需用户验收。
+- Cursor 界面的普通 Agent、工具循环已确认实际调用 BYOK；Task 工具拉起的
+  3 个子 Agent 也已实际调用 BYOK。独立 Multitask 模式完整流程仍需验收。
 - 当前 Claude 配置的真实上游返回 503 `model_not_found` / 无可用通道；
   因此 Claude 的真实模型回复尚未验证。
 
 当前适配 HTTP/1 SSE。未实现原生双向 `RunInference`、`RunInferencePoll`、
 增量或压缩请求；服务不协商后两项。直接文件内容及 Provider 自带工具尚未支持。
-官方后台分类/标注 RPC 尚未适配 BYOK 模型 hash，可能产生非致命后台日志。
+后台分类/标注 RPC 已对本地模型作本地应答。真实使用中另观察到一次
+Responses 上游流在 `response.completed` 前中断，客户端如实显示错误。
+本机直连 Google 也超时，部分联网工具仍依赖可用的网络出口。
 不能据此宣称任意模型与所有 Cursor 功能已经验证。
 
 ## 本机环境
@@ -57,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 ```text
 D:\devtools\cursor-byok\target\release\cursor-byok-desktop.exe
-D:\devtools\cursor-byok\target\release\bundle\nsis\Cursor BYOK_1.0.4_x64-setup.exe
+D:\devtools\cursor-byok\target\release\bundle\nsis\Cursor BYOK_1.0.5_x64-setup.exe
 ```
 
 ## 手工验收

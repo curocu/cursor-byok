@@ -88,6 +88,15 @@ pub fn prompt_metadata(
         is_gpt56: slug.contains("gpt-5-6"),
         is_codex_family: slug.contains("codex"),
         self_identity_name: "Cursor".into(),
+        feature_flags: [(
+            "dynamicToolProfile".into(),
+            pb::RunInferenceFlagValue {
+                value: Some(pb::run_inference_flag_value::Value::StringValue(
+                    "all-static".into(),
+                )),
+            },
+        )]
+        .into(),
         reasoning_effort: selected
             .parameters
             .iter()

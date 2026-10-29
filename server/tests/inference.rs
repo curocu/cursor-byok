@@ -180,7 +180,14 @@ async fn cursor_local_loop_can_call_a_tool_and_submit_its_result() {
     let S::RunReady(ready) = next(&mut stream).await else {
         panic!("expected run_ready")
     };
+    assert!(ready.accepts_agent_events);
     let metadata = ready.prompt_model_metadata.unwrap();
+    assert_eq!(
+        metadata.feature_flags["dynamicToolProfile"].value,
+        Some(pb::run_inference_flag_value::Value::StringValue(
+            "all-static".into()
+        ))
+    );
     for mode in ["agent", "chat", "plan", "debug", "triage", "multitask"] {
         assert!(metadata
             .agent_mode_configs
@@ -375,4 +382,54 @@ fn new_run_schema_reproduces_the_reported_old_decoder_failure() {
     let bytes = message.encode_to_vec();
     assert!(agent::AgentClientMessage::decode(bytes.as_slice()).is_err());
     assert!(pb::RunInferenceClientMessage::decode(bytes.as_slice()).is_ok());
+}
+
+#[tokio::test]
+async fn labeling_records_for_byok_stay_local_while_official_models_are_forwarded() {
+    use cursor_server::cursor::services::inference_telemetry::{FOLLOWUP_PATH, POST_TURN_PATH};
+    let (_dir, store) = fixtures::temp_store().await;
+    let model = store.create_model(&model_input()).await.unwrap();
+    let assets =
+        PromptAssets::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt/cursor"))
+            .unwrap();
+    let registry = TransportRegistry::new(
+        store.clone(),
+        Arc::new(fake_provider::FakeProvider::default()),
+        PromptCompiler::new(assets),
+    );
+    let app = cursor::router(registry, NetworkClients::new(store)).unwrap();
+    for (path, model_tag) in [(FOLLOWUP_PATH, 6), (POST_TURN_PATH, 5)] {
+        for selected in [
+            model.model_hash.as_str(),
+            "plugin:test:model",
+            "official-model",
+        ] {
+            // An invalid official upstream URL makes accidental forwarding fail locally.
+            let mut data = vec![(model_tag << 3) | 2, selected.len() as u8];
+            data.extend_from_slice(selected.as_bytes());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/proto")
+                        .header("x-server-upstream-url", "https://example.com/never-forward")
+                        .body(Body::from(data))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if selected == "official-model" {
+                assert_eq!(status, 400);
+                assert!(String::from_utf8_lossy(&body)
+                    .contains("upstream URL must target a Cursor HTTPS host"));
+            } else {
+                assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+                assert!(body.is_empty());
+            }
+        }
+    }
 }

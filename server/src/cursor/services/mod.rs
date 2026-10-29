@@ -7,6 +7,7 @@ pub mod commit_message;
 pub mod compatibility;
 pub mod context_sync;
 pub(crate) mod entitlement;
+pub mod inference_telemetry;
 pub mod knowledge;
 pub mod model_catalog;
 pub mod observability;
