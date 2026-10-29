@@ -76,7 +76,7 @@ pub fn subagent_kind(value: &str) -> SubagentKind {
     }
 }
 
-fn from_requested(
+pub(crate) fn from_requested(
     model: &pb::RequestedModel,
     details: Option<&pb::ModelDetails>,
 ) -> Result<ModelSpec> {

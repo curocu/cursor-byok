@@ -1,4 +1,8 @@
 //! Includes generated Cursor protobuf types.
+pub mod inference {
+    include!(concat!(env!("OUT_DIR"), "/cursorbyok.inference.rs"));
+}
+
 pub mod agent {
     #[allow(clippy::large_enum_variant)]
     pub mod v1 {

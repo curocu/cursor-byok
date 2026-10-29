@@ -42,11 +42,16 @@ fn router_with_proxy(
     proxy: CursorProxy,
     knowledge_service: knowledge::KnowledgeService,
 ) -> Router {
+    let inference = super::inference::InferenceService::new(&registry);
     let web_cache = registry.web_cache().router();
     let free_entitlements = FreeEntitlementCache::default();
     Router::new()
         .route("/__byok-api__/healthz", get(health))
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
+        .route(
+            "/aiserver.v1.InferenceService/RunInferenceSSE",
+            post(super::inference::stream),
+        )
         .route("/aiserver.v1.BidiService/BidiAppend", post(bidi_handler))
         .route(
             "/aiserver.v1.AiService/AvailableDocs",
@@ -161,6 +166,7 @@ fn router_with_proxy(
         .fallback(proxy::forward)
         .method_not_allowed_fallback(proxy::forward)
         .layer(Extension(proxy))
+        .layer(Extension(inference))
         .layer(Extension(knowledge_service))
         .layer(Extension(free_entitlements))
         .with_state(registry)
@@ -228,10 +234,24 @@ async fn run_sse_handler(
 async fn bidi_handler(
     State(registry): State<TransportRegistry>,
     Extension(proxy): Extension<CursorProxy>,
+    Extension(inference): Extension<super::inference::InferenceService>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
+    if let Some(local) = inference.append(&request).await? {
+        if !local {
+            return proxy::forward(
+                Extension(proxy),
+                Request::from_parts(parts, Body::from(body)),
+            )
+            .await;
+        }
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/proto")
+            .body(Body::empty())
+            .expect("static Bidi response headers"));
+    }
     let decoded = bidi::decode(&request)?;
     let first_model = decoded.model_id().map(str::to_owned);
     let conversation_id = decoded.conversation_id().map(str::to_owned);

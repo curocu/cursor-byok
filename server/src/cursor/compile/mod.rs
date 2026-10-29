@@ -5,7 +5,7 @@ mod break_messages;
 mod context;
 mod images;
 mod insert_messages;
-mod model;
+pub(crate) mod model;
 mod run;
 
 pub use action::*;
