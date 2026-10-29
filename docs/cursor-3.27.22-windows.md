@@ -1,6 +1,9 @@
 # Cursor 3.27.22 Windows 适配与构建
 
-适配版本：Cursor 3.27.22；桌面包版本：1.0.5。
+适配版本：Cursor 3.27.22；桌面包版本：1.0.6。
+
+1.0.6 不再回传路由模型显示名称，隐藏 Cursor 的 “Routed to …” 提示及其评价按钮。
+实际模型路由、工具调用与流式回复保持不变；已存在的聊天记录可能仍保留原提示。
 
 ## 修复范围
 
@@ -64,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 ```text
 D:\devtools\cursor-byok\target\release\cursor-byok-desktop.exe
-D:\devtools\cursor-byok\target\release\bundle\nsis\Cursor BYOK_1.0.5_x64-setup.exe
+D:\devtools\cursor-byok\target\release\bundle\nsis\Cursor BYOK_1.0.6_x64-setup.exe
 ```
 
 ## 手工验收

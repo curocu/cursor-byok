@@ -216,8 +216,6 @@ impl InferenceService {
                                 configured.as_ref(),
                                 &self.inner.store.models().await?,
                             ));
-                        ready.routed_model_display_name =
-                            configured.as_ref().map(|m| m.display_name.clone());
                         tracing::info!(%request_id, conversation_id=%request.conversation_id, model_id=%model.model_id, "routing RunInference to BYOK provider");
                         emit(
                             &session.output,

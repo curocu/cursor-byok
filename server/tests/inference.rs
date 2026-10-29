@@ -181,6 +181,7 @@ async fn cursor_local_loop_can_call_a_tool_and_submit_its_result() {
         panic!("expected run_ready")
     };
     assert!(ready.accepts_agent_events);
+    assert!(ready.routed_model_display_name.is_none());
     let metadata = ready.prompt_model_metadata.unwrap();
     assert_eq!(
         metadata.feature_flags["dynamicToolProfile"].value,
