@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, pluginText, type CommitSettingsView } from "../../shared/api";
+import { api, type CommitSettingsView } from "../../shared/api";
 import { commitPromptLocale } from "../../i18n/runtime";
 import { useI18n } from "../../i18n/store";
 import { useAppStore } from "../../shared/store/appStore";
 import { Button } from "../../shared/ui/Button";
 import { Modal } from "../../shared/ui/Modal";
 import { ModelSelect, type ModelSelectOption } from "../../shared/ui/ModelSelect";
-import { claudeIcon, flatColorOrganizationIcon, openAiIcon } from "../../shared/ui/icons";
+import { claudeIcon, openAiIcon } from "../../shared/ui/icons";
 import { TitledCard } from "../../shared/ui/TitledCard";
 import { useMessage } from "../../shared/ui/message";
 import controls from "../../shared/ui/Controls.module.scss";
 import { modelProviderName } from "../../shared/utils/modelProvider";
+import { isImageModel } from "../../shared/utils/imageGeneration";
 import styles from "./CommitSettingsCard.module.scss";
 
 function errorText(cause: unknown) {
@@ -18,7 +19,7 @@ function errorText(cause: unknown) {
 }
 
 export function CommitSettingsCard() {
-  const { models, plugins } = useAppStore();
+  const { models } = useAppStore();
   const { locale } = useI18n();
   const message = useMessage();
   const [view, setView] = useState<CommitSettingsView | null>(null);
@@ -58,7 +59,7 @@ export function CommitSettingsCard() {
   const modelOptions = useMemo(() => {
     const options: ModelSelectOption[] = [{ value: "", label: t("直连"), group: "Cursor" }];
     const seen = new Set<string>();
-    for (const model of models) {
+    for (const model of models.filter((item) => !isImageModel(item))) {
       seen.add(model.model_hash);
       options.push({
         value: model.model_hash,
@@ -69,27 +70,11 @@ export function CommitSettingsCard() {
         icon: model.type === "anthropic" ? claudeIcon : openAiIcon,
       });
     }
-    for (const plugin of plugins) {
-      for (const provider of plugin.providers) {
-        if (!provider.configured) continue;
-        const group = pluginText(provider.displayName, locale) || plugin.name;
-        for (const model of provider.models.filter((model) => model.enabled)) {
-          seen.add(model.id);
-          options.push({
-            value: model.id,
-            label: model.displayName,
-            group,
-            iconSrc: model.icon || undefined,
-            icon: model.icon ? undefined : flatColorOrganizationIcon,
-          });
-        }
-      }
-    }
     if (view?.model_id && !seen.has(view.model_id)) {
       options.push({ value: view.model_id, label: view.model_id, group: "Cursor" });
     }
     return options;
-  }, [locale, models, plugins, view]);
+  }, [locale, models, view]);
 
   const persist = useCallback(
     async (modelId: string, prompt: string) => {

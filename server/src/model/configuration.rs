@@ -9,6 +9,9 @@ use crate::{Error, Result};
 
 pub const OPENAI_RESPONSES_ENDPOINT: &str = "/v1/responses";
 pub const OPENAI_CHAT_ENDPOINT: &str = "/v1/chat/completions";
+pub const OPENAI_IMAGES_ENDPOINT: &str = "/v1/images/generations";
+/// Protocol selection, distinct from chat even when using the same request URL.
+pub const OPENAI_RESPONSES_IMAGE_ENDPOINT: &str = "responses-image-generation";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ProviderType {
@@ -16,9 +19,11 @@ pub enum ProviderType {
     OpenAiChat,
     #[serde(rename = "openai-responses")]
     OpenAiResponses,
+    #[serde(rename = "openai-images")]
+    OpenAiImages,
     #[serde(rename = "anthropic")]
     Anthropic,
-    /// 插件执行的调用;协议细节在插件内部,核心只按统一事件流记录。
+    /// Historical plugin calls retained for statistics; no plugin execution is supported.
     #[serde(rename = "plugin")]
     Plugin,
 }
@@ -28,6 +33,7 @@ impl ProviderType {
         match self {
             Self::OpenAiChat => "openai-chat",
             Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiImages => "openai-images",
             Self::Anthropic => "anthropic",
             Self::Plugin => "plugin",
         }
@@ -47,6 +53,7 @@ impl FromStr for ProviderType {
         match value {
             "openai-chat" => Ok(Self::OpenAiChat),
             "openai-responses" => Ok(Self::OpenAiResponses),
+            "openai-images" => Ok(Self::OpenAiImages),
             "anthropic" => Ok(Self::Anthropic),
             "plugin" => Ok(Self::Plugin),
             _ => Err(Error::Config(format!("unsupported provider type: {value}"))),
@@ -153,8 +160,14 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    pub fn is_image_generation(&self) -> bool {
+        self.model_type == ModelType::OpenAi
+            && matches!(self.openai_endpoint.as_str(), OPENAI_IMAGES_ENDPOINT | OPENAI_RESPONSES_IMAGE_ENDPOINT)
+    }
+
     pub fn provider_type(&self) -> ProviderType {
         match self.model_type {
+            ModelType::OpenAi if self.is_image_generation() => ProviderType::OpenAiImages,
             ModelType::Anthropic => ProviderType::Anthropic,
             ModelType::OpenAi if self.openai_endpoint == OPENAI_RESPONSES_ENDPOINT => {
                 ProviderType::OpenAiResponses
@@ -233,6 +246,8 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
         ModelType::OpenAi => normalize_openai_endpoint(&input.openai_endpoint)?,
         ModelType::Anthropic => String::new(),
     };
+    let image_generation = input.model_type == ModelType::OpenAi
+        && matches!(openai_endpoint.as_str(), OPENAI_IMAGES_ENDPOINT | OPENAI_RESPONSES_IMAGE_ENDPOINT);
     validate_object(&input.openai_extra_params, "OpenAI extra params")?;
     validate_object(&input.anthropic_extra_params, "Anthropic extra params")?;
     validate_headers(&input.custom_headers)?;
@@ -247,7 +262,7 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
         api_key,
         tooltip_data,
         model_id,
-        reasoning_effort: (input.model_type == ModelType::OpenAi)
+        reasoning_effort: (input.model_type == ModelType::OpenAi && !image_generation)
             .then_some(reasoning_effort)
             .flatten(),
         openai_endpoint,
@@ -267,11 +282,11 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
         } else {
             empty_object()
         },
-        context_window_tokens: positive(input.context_window_tokens, "context window")?,
-        max_completion_tokens: positive(input.max_completion_tokens, "max completion tokens")?,
-        anthropic_max_tokens: positive(input.anthropic_max_tokens, "Anthropic max tokens")?,
+        context_window_tokens: if image_generation { None } else { positive(input.context_window_tokens, "context window")? },
+        max_completion_tokens: if image_generation { None } else { positive(input.max_completion_tokens, "max completion tokens")? },
+        anthropic_max_tokens: if image_generation { None } else { positive(input.anthropic_max_tokens, "Anthropic max tokens")? },
         anthropic_thinking_effort,
-        thinking_budget_tokens: positive(input.thinking_budget_tokens, "thinking budget")?,
+        thinking_budget_tokens: if image_generation { None } else { positive(input.thinking_budget_tokens, "thinking budget")? },
     };
     resolve_request_url(
         normalized.model_type,
@@ -334,7 +349,8 @@ pub fn resolve_request_url(
     if use_full_url {
         return Ok(base_url);
     }
-    append_standard_endpoint(&base_url, &endpoint)
+    let endpoint = if endpoint == OPENAI_RESPONSES_IMAGE_ENDPOINT { OPENAI_RESPONSES_ENDPOINT } else { &endpoint };
+    append_standard_endpoint(&base_url, endpoint)
 }
 
 fn append_standard_endpoint(base_url: &str, endpoint: &str) -> Result<String> {
@@ -370,6 +386,8 @@ fn normalize_openai_endpoint(value: &str) -> Result<String> {
     match value.trim() {
         "" | OPENAI_RESPONSES_ENDPOINT => Ok(OPENAI_RESPONSES_ENDPOINT.into()),
         OPENAI_CHAT_ENDPOINT => Ok(OPENAI_CHAT_ENDPOINT.into()),
+        OPENAI_IMAGES_ENDPOINT => Ok(OPENAI_IMAGES_ENDPOINT.into()),
+        OPENAI_RESPONSES_IMAGE_ENDPOINT => Ok(OPENAI_RESPONSES_IMAGE_ENDPOINT.into()),
         value => Err(Error::Config(format!(
             "unsupported OpenAI endpoint: {value}"
         ))),

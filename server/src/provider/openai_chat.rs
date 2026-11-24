@@ -94,6 +94,7 @@ impl Provider for OpenAiChatProvider {
             }
             let attempt = send_once(
                 "OpenAI Chat",
+                &config.api_key,
                 || client.post(&config.request_url)
                     .bearer_auth(&config.api_key).headers(config.custom_headers.clone()).json(&body),
                 &cancellation,

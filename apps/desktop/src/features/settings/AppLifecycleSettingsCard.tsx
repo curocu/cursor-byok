@@ -112,6 +112,12 @@ export function AppLifecycleSettingsCard() {
   return <TitledCard title={t("应用设置")}>
     <div className={styles.row}>
       <div>
+        <strong>{t("关闭窗口")}</strong>
+        <small>{t("点击 × 或按 Alt+F4 隐藏到系统托盘，保留当前页面，后台服务继续运行。完全退出请使用托盘菜单中的“退出”。")}</small>
+      </div>
+    </div>
+    <div className={styles.row}>
+      <div>
         <strong>{t("开机启动")}</strong>
         <small>{t("登录系统后自动启动 Cursor BYOK。")}</small>
       </div>

@@ -10,6 +10,17 @@ use super::{
     ToolCallContent, ToolResultContent,
 };
 
+/// Ordered assistant blocks on Cursor's inference wire. Tool indices refer to `calls`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum AssistantPart {
+    Text(String),
+    Reasoning {
+        text: String,
+        replay_state: Option<ProviderReplayState>,
+    },
+    ToolCall(usize),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ProjectedContent {
     Parts(Vec<ContentPart>),
@@ -18,6 +29,8 @@ pub enum ProjectedContent {
         thinking: String,
         replay_state: Option<ProviderReplayState>,
         calls: Vec<ToolCallContent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<AssistantPart>,
     },
     ToolResult(ToolResultContent),
 }
@@ -131,6 +144,7 @@ fn project_tool_round(
             thinking,
             replay_state,
             calls,
+            parts: Vec::new(),
         },
     });
     output.extend(
@@ -159,6 +173,7 @@ fn project_message(message: &CanonicalMessage) -> ProjectedMessage {
             thinking: thinking.clone(),
             replay_state: replay_state.clone(),
             calls: tool_calls.iter().map(normalized_tool_call).collect(),
+            parts: Vec::new(),
         },
         MessageContent::ToolResult(result) => {
             ProjectedContent::ToolResult(normalized_tool_result(result))

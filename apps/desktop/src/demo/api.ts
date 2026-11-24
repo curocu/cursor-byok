@@ -1,7 +1,6 @@
 import type {
   CallDetail,
   CursorHarnessStatus,
-  ExternalApiSettings,
   LlmCall,
   Model,
   Overview,
@@ -10,6 +9,8 @@ import type {
   StatisticsStorage,
   TabSettings,
 } from "../shared/api";
+
+import type { ThemeId } from "../shared/theme/theme";
 
 const API_ROOT = "/__byok-api__/api";
 const FIXED_NOW = Date.UTC(2026, 7, 27, 8, 0, 0);
@@ -87,7 +88,6 @@ let harnessStatus: CursorHarnessStatus = {
 
 let detailed = true;
 let portSettings = { proxy_port: 0, service_port: 0 };
-let externalApiSettings: ExternalApiSettings = { enabled: false, api_key: "" };
 let proxySettings: ProxySettings = {
   mode: "default",
   address: "",
@@ -97,9 +97,12 @@ let proxySettings: ProxySettings = {
 };
 let tabSettings: TabSettings = { mode: "public", address: "" };
 let storage: StatisticsStorage = { call_count: calls.length, trace_count: calls.length };
+let imageGenerationSettings = { model_hash: "" };
 
-export function installDemoApi() {
+export function installDemoApi(theme: ThemeId) {
   const nativeFetch = window.fetch.bind(window);
+  const activePort = Number(window.location.port) || (window.location.protocol === "https:" ? 443 : 80);
+  portSettings = { ...portSettings, service_port: activePort };
 
   window.fetch = async (input, init) => {
     const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
@@ -109,6 +112,10 @@ export function installDemoApi() {
     const path = url.pathname.slice(API_ROOT.length) || "/";
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const body = await readBody(input, init);
+    if (path === "/settings/image-generation") {
+      if (method === "PUT") imageGenerationSettings = body as { model_hash: string };
+      return json(imageGenerationSettings);
+    }
 
     if (path === "/promotions") return json({ slots: [] });
     if (path === "/models" && method === "GET") return json(models);
@@ -150,11 +157,10 @@ export function installDemoApi() {
       portSettings = body as typeof portSettings;
       return json(portSettings);
     }
-    if (path === "/settings/external-api" && method === "GET") return json(externalApiSettings);
-    if (path === "/settings/external-api") {
-      externalApiSettings = body as ExternalApiSettings;
-      return json(externalApiSettings);
-    }
+    if (path === "/settings/pricing" && method === "GET") return json({ input_per_million: 5, output_per_million: 25, cache_read_per_million: 0.5, cache_write_per_million: 6.25 });
+    if (path === "/settings/pricing") return json(body);
+    if (path === "/settings/commit" && method === "GET") return json({ model_id: "", prompt: "", prompt_locale: "zh-CN", default_prompt: "Generate a commit message." });
+    if (path === "/settings/commit") return json({ ...(body as object), default_prompt: "Generate a commit message." });
     if (path === "/settings/storage/statistics" && method === "GET") return json(storage);
     if (path === "/settings/storage/statistics") {
       const scope = (body as { scope?: string } | null)?.scope ?? "details";
@@ -171,6 +177,11 @@ export function installDemoApi() {
     if (path === "/settings/tab") {
       tabSettings = body as TabSettings;
       return json(tabSettings);
+    }
+    if (path === "/settings/theme" && method === "GET") return json(theme);
+    if (path === "/settings/theme") {
+      theme = body as ThemeId;
+      return json(theme);
     }
     if (path === "/settings/desktop" && method === "GET") return json({ silent_start: false, show_dock_icon: true });
     if (path === "/settings/desktop") return json(body);

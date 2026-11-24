@@ -142,6 +142,13 @@ pub(crate) async fn prepare(
     let mut model = model::requested_model(request)?;
     if let Some(configured_model) = store.model(&model.model_id).await? {
         configured_model.configure(&mut model);
+        // The native GenerateImage tool is Cursor-owned: BYOK only supplies
+        // the prompt tool definition when it can execute the image call.
+        model.supports_image_generation = !store
+            .image_generation_settings()
+            .await?
+            .model_hash
+            .is_empty();
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;

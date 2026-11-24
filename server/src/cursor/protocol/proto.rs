@@ -13,6 +13,64 @@ pub mod agent {
 pub mod aiserver {
     pub mod v1 {
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct GenerateImageReferenceImage {
+            #[prost(string, tag = "1")]
+            pub data: String,
+            #[prost(string, tag = "2")]
+            pub mime_type: String,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct RunGenerateImageRequest {
+            #[prost(string, tag = "1")]
+            pub description: String,
+            #[prost(message, repeated, tag = "2")]
+            pub reference_images: Vec<GenerateImageReferenceImage>,
+            #[prost(string, tag = "3")]
+            pub model_id: String,
+            #[prost(bool, tag = "4")]
+            pub max_mode: bool,
+            #[prost(string, optional, tag = "5")]
+            pub aspect_ratio: Option<String>,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct RunGenerateImageResponse {
+            #[prost(oneof = "run_generate_image_response::Result", tags = "1, 2")]
+            pub result: Option<run_generate_image_response::Result>,
+        }
+
+        pub mod run_generate_image_response {
+            #[derive(Clone, PartialEq, ::prost::Oneof)]
+            pub enum Result {
+                #[prost(message, tag = "1")]
+                Success(super::RunGenerateImageSuccess),
+                #[prost(message, tag = "2")]
+                Error(super::RunGenerateImageError),
+            }
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct RunGenerateImageSuccess {
+            #[prost(string, tag = "1")]
+            pub image_data: String,
+            #[prost(string, tag = "2")]
+            pub mime_type: String,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct RunGenerateImageError {
+            #[prost(string, tag = "1")]
+            pub error: String,
+            #[prost(bool, tag = "2")]
+            pub model_restricted: bool,
+            #[prost(int32, optional, tag = "3")]
+            pub provider_status_code: Option<i32>,
+            #[prost(bool, tag = "4")]
+            pub content_safety_blocked: bool,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct BidiRequestId {
             #[prost(string, tag = "1")]
             pub request_id: String,
@@ -83,6 +141,8 @@ pub mod aiserver {
             pub show_request_id: Option<bool>,
             #[prost(bool, optional, tag = "6")]
             pub should_show_immediate_error: Option<bool>,
+            #[prost(map = "string, string", tag = "7")]
+            pub additional_info: std::collections::HashMap<String, String>,
         }
 
         #[derive(Clone, PartialEq, ::prost::Message)]
@@ -102,7 +162,9 @@ pub mod aiserver {
             #[repr(i32)]
             pub enum Error {
                 Unspecified = 0,
+                UserAbortedRequest = 21,
                 CustomMessage = 29,
+                BadUserApiKey = 42,
                 ProviderError = 57,
                 Internal = 59,
             }

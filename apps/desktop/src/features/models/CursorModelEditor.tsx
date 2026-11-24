@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import type { ModelInput, ModelType } from "../../shared/api";
+import { isImageModel, migrateImageOptions } from "../../shared/utils/imageGeneration";
 import { defaultCustomHeadersText } from "../../shared/utils/modelDefaults";
 import { modelPresets, presetEndpoint, trimTrailingSlash, type ModelPreset } from "../../shared/utils/modelPresets";
 import { Button } from "../../shared/ui/Button";
@@ -10,6 +11,7 @@ import { Combobox, Select, type ComboboxHandle } from "../../shared/ui/Select";
 import { Switch } from "../../shared/ui/Switch";
 import { claudeIcon, openAiIcon } from "../../shared/ui/icons";
 import { CursorPresetChips } from "./CursorPresetChips";
+import { ImageModelOptions } from "./ImageModelOptions";
 import styles from "./CursorSettings.module.scss";
 
 export type CursorModelDraft = {
@@ -51,7 +53,8 @@ export const emptyCursorModelDraft = (): CursorModelDraft => ({
   anthropicExtraParamsText: "{}",
 });
 
-export function CursorModelEditor({ draft, modelOptions, discovering, onChange, onDiscover }: {
+export function CursorModelEditor({ draft, modelOptions, discovering, onChange, onDiscover, imageGeneration }: {
+  imageGeneration: boolean;
   draft: CursorModelDraft;
   modelOptions: string[];
   discovering: boolean;
@@ -59,7 +62,24 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
   onDiscover: () => Promise<boolean>;
 }) {
   const modelCombobox = useRef<ComboboxHandle>(null);
+  const imageModel = isImageModel(draft.model);
   const setModel = (patch: Partial<ModelInput>) => onChange({ ...draft, model: { ...draft.model, ...patch } });
+  const changeEndpoint = (openai_endpoint: string) => {
+    if (!imageModel || openai_endpoint === draft.model.openai_endpoint) {
+      setModel({ openai_endpoint });
+      return;
+    }
+    let text = draft.openAIExtraParamsText;
+    try {
+      const extra: unknown = JSON.parse(text || "{}");
+      if (extra && typeof extra === "object" && !Array.isArray(extra)) {
+        text = JSON.stringify(migrateImageOptions(extra as Record<string, unknown>, draft.model.openai_endpoint, openai_endpoint), null, 2);
+      }
+    } catch {
+      // Keep the original JSON so the advanced editor can show the parse error.
+    }
+    onChange({ ...draft, model: { ...draft.model, openai_endpoint }, openAIExtraParamsText: text });
+  };
   const setType = (type: ModelType) => {
     // 切换协议类型时，若当前地址命中某预设的另一协议端点，自动换到该预设对应协议的端点，
     // 避免出现「类型是 Anthropic、URL 却是 OpenAI chat/completions」的错配
@@ -88,6 +108,7 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
   const canDiscover = Boolean(draft.model.base_url.trim() && draft.model.api_key.trim());
   // 选中预设后，把该服务商已知的模型 id 并入下拉，方便直接选（仍可用「获取模型」发现）
   const presetModelOptions = modelPresets
+    .filter(() => !imageModel)
     .filter((preset) => trimTrailingSlash(presetEndpoint(preset, draft.model.type).baseUrl) === trimTrailingSlash(draft.model.base_url.trim()))
     .flatMap((preset) => preset.models.map((item) => item.model_id));
   const combinedOptions = [...new Set([...modelOptions, ...presetModelOptions])];
@@ -125,6 +146,8 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
   const requestUrlPlaceholder = draft.model.use_full_url
     ? draft.model.type === "anthropic"
       ? "https://api.anthropic.com/v1/messages"
+      : draft.model.openai_endpoint === "/v1/images/generations"
+        ? "https://api.openai.com/v1/images/generations"
       : draft.model.openai_endpoint === "/v1/chat/completions"
         ? "https://api.openai.com/v1/chat/completions"
         : "https://api.openai.com/v1/responses"
@@ -142,13 +165,18 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
   };
 
   return <div className={styles.editor}>
-    <CursorPresetChips type={draft.model.type} baseUrl={draft.model.base_url} onPick={applyPreset} />
+    {!imageModel && <CursorPresetChips type={draft.model.type} baseUrl={draft.model.base_url} onPick={applyPreset} />}
     <div className={styles.grid}>
-      <FormField label={t("模型类型")}><Select ariaLabel={t("模型类型")} value={draft.providerId} options={providerOptions} onChange={setProvider} /></FormField>
-      {draft.model.type === "openai" && <FormField label={t("请求协议")} hint={t("只决定请求与响应的格式，不会改变请求地址。")}> <Select ariaLabel={t("请求协议")} value={draft.model.openai_endpoint} options={[
-        { value: "/v1/responses", label: "Responses API" },
-        { value: "/v1/chat/completions", label: "Chat Completions API" },
-      ]} onChange={(openai_endpoint) => setModel({ openai_endpoint })} /></FormField>}
+      {!imageGeneration && <FormField label={t("模型类型")}><Select ariaLabel={t("模型类型")} value={draft.providerId} options={providerOptions} onChange={setProvider} /></FormField>}
+      {draft.model.type === "openai" && <FormField label={t("请求协议")} hint={t("协议决定请求格式和标准路径；完整请求地址保持原样。生图模型不会出现在聊天模型菜单。")}> <Select ariaLabel={t("请求协议")} value={draft.model.openai_endpoint} options={[
+        ...(imageGeneration ? [
+          { value: "/v1/images/generations", label: t("Images API（生图）") },
+          { value: "responses-image-generation", label: t("Responses API（生图）") },
+        ] : [
+          { value: "/v1/responses", label: "Responses API" },
+          { value: "/v1/chat/completions", label: "Chat Completions API" },
+        ]),
+      ]} onChange={changeEndpoint} /></FormField>}
 
       <div className={styles.urlField}>
         <FormField label={draft.model.use_full_url ? t("完整请求 URL") : t("服务器地址")} hint={draft.model.use_full_url ? t("系统会原样使用此地址，不追加或修改请求路径。") : t("系统会根据请求协议自动追加标准端点路径。")}> <TextInput placeholder={requestUrlPlaceholder} value={draft.model.base_url} onChange={(event) => setModel({ base_url: event.target.value })} /></FormField>
@@ -160,6 +188,7 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
       <FormField label={t("显示名称")} hint={t("仅用于界面展示，不会改变发送给模型服务的模型名称。")}> <TextInput placeholder={t("例如：主力模型")} value={draft.model.display_name} onChange={(event) => setModel({ display_name: event.target.value })} /></FormField>
       <FormField className={styles.fullWidth} label={t("备注")} hint={t("显示在 Cursor 模型说明中。")}> <TextInput placeholder={t("请输入模型备注")} value={draft.model.tooltip_data} onChange={(event) => setModel({ tooltip_data: event.target.value })} /></FormField>
 
+      {!imageModel && <>
       <FormField label={t("上下文窗口 Token")} hint={t("留空时使用默认值。")}> <TextInput type="number" min={1} step={1} placeholder={t("留空使用默认值")} value={draft.model.context_window_tokens ?? ""} onChange={(event) => setModel({ context_window_tokens: numberValue(event.target.value) })} /></FormField>
       {draft.model.type === "openai" ? <>
         <FormField label={t("最大输出 Token")} hint={t("留空时使用默认值。")}> <TextInput type="number" min={1} step={1} placeholder={t("留空使用默认值")} value={draft.model.max_completion_tokens ?? ""} onChange={(event) => setModel({ max_completion_tokens: numberValue(event.target.value) })} /></FormField>
@@ -170,6 +199,10 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
         <FormField label={t("思考预算 Token")} hint={t("留空时使用 adaptive thinking。")}> <TextInput type="number" min={1} step={1} placeholder={t("留空使用 adaptive thinking")} value={draft.model.thinking_budget_tokens ?? ""} onChange={(event) => setModel({ thinking_budget_tokens: numberValue(event.target.value) })} /></FormField>
       </>}
 
+      </>}
+      {imageModel && <p className={styles.fullWidth}>{t("生图测试会实际生成一张图片并产生服务用量。Images API 参考图使用 edits，完整地址需指向 /images/edits。宽高比 1:1、3:2、2:3 映射为标准尺寸，其他比例通过提示传递，效果取决于服务。")}</p>}
+      {draft.model.openai_endpoint === "responses-image-generation" && <p className={styles.fullWidth}>{t('Responses 生图的模型名称填写支持 image_generation 工具的主模型；可在额外参数配置 {"tools":[{"type":"image_generation","model":"生图模型ID"}]}。尺寸、画质、格式也放在该工具对象中。')}</p>}
+
       <ToggleJsonField
         label={t("自定义 Headers")}
         enabled={draft.model.custom_headers_enabled}
@@ -177,7 +210,7 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
         onEnabledChange={(custom_headers_enabled) => setModel({ custom_headers_enabled })}
         onTextChange={(customHeadersText) => onChange({ ...draft, customHeadersText })}
       />
-      {draft.model.type === "openai" ? <ToggleJsonField
+      {imageModel ? <ImageModelOptions draft={draft} onChange={onChange} /> : draft.model.type === "openai" ? <ToggleJsonField
         label={t("OpenAI 额外参数")}
         enabled={draft.model.openai_extra_params_enabled}
         text={draft.openAIExtraParamsText}

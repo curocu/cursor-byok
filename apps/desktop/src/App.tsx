@@ -9,7 +9,6 @@ import { CallsPage } from "./features/calls/CallsPage";
 import { CallDetailsPage } from "./features/calls/CallDetailsPage";
 import { CursorSettingsPage } from "./features/models/CursorSettingsPage";
 import { HomePage } from "./features/home/HomePage";
-import { PluginManagementPage } from "./features/plugins/PluginManagementPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { useAppStore } from "./shared/store/appStore";
 import { updateStore } from "./shared/store/updateStore";
@@ -27,7 +26,6 @@ export function App() {
               <Route index element={<HomePage />} />
               <Route path="calls" element={<CallsPage />} />
               <Route path="harness/cursor" element={<CursorSettingsPage />} />
-              <Route path="plugins" element={<PluginManagementPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

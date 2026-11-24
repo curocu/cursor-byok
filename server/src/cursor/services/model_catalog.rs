@@ -11,7 +11,6 @@ use crate::{
     api::cursor::proxy::{self, CursorProxy},
     cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
     model::{format_token_count, parse_token_count, ModelConfig},
-    plugin::PluginModelDescriptor,
     Error, Result,
 };
 
@@ -21,7 +20,32 @@ struct AvailableModelsAddition {
     model_names: Vec<String>,
     #[prost(message, repeated, tag = "2")]
     models: Vec<AvailableModel>,
+    #[prost(message, optional, tag = "15")]
+    display_configuration: Option<ModelPickerDisplayConfiguration>,
 }
+
+#[derive(Clone, PartialEq, Message)]
+struct ModelPickerDisplayConfiguration {
+    #[prost(message, optional, tag = "1")]
+    routed_model_view_config: Option<RoutedModelViewConfig>,
+    #[prost(message, optional, tag = "2")]
+    named_models_view_config: Option<NamedModelsViewConfig>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RoutedModelViewConfig {
+    #[prost(bool, optional, tag = "5")]
+    hide_routed_model_view: Option<bool>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct NamedModelsViewConfig {
+    #[prost(message, optional, tag = "3")]
+    named_view_to_routed_model_view_no_button: Option<NoRoutedModelButton>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct NoRoutedModelButton {}
 
 #[derive(Clone, PartialEq, Message)]
 struct AvailableModel {
@@ -220,7 +244,8 @@ const CONTEXTS: [(&str, &str); 5] = [
     ("800k", "800K"),
     ("1m", "1M"),
 ];
-const EFFORTS: [(&str, &str); 5] = [
+const EFFORTS: [(&str, &str); 6] = [
+    ("default", "Default"),
     ("low", "Low"),
     ("medium", "Medium"),
     ("high", "High"),
@@ -251,33 +276,38 @@ pub async fn available_models(
     Extension(proxy): Extension<CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
-    let models = registry.store().models().await?;
-    let plugin_models = match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    };
+    let models = registry.store().chat_models().await?;
     tracing::info!(
         model_count = models.len(),
-        plugin_model_count = plugin_models.len(),
-        "appending BYOK models to Cursor AvailableModels"
+        "publishing BYOK-only models to Cursor AvailableModels"
     );
-    let mut available_models = models.iter().map(available_model).collect::<Vec<_>>();
-    available_models.extend(plugin_models.iter().map(available_plugin_model));
-    let local = AvailableModelsAddition {
-        model_names: models
-            .iter()
-            .map(|model| model.model_hash.clone())
-            .chain(plugin_models.iter().map(|model| model.id.clone()))
-            .collect(),
-        models: available_models,
-    }
-    .encode_to_vec();
+    let local = available_catalog(&models).encode_to_vec();
     match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local),
+        Ok(upstream) => replace_response(upstream, local, &[1, 2, 15, 19, 20, 21]),
         Err(error) => {
             tracing::warn!(%error, "Cursor AvailableModels upstream unavailable; using local catalog");
             Ok(local_response(local))
         }
+    }
+}
+
+fn available_catalog(models: &[ModelConfig]) -> AvailableModelsAddition {
+    AvailableModelsAddition {
+        model_names: models
+            .iter()
+            .map(|model| model.model_hash.clone())
+            .collect(),
+        models: models.iter().map(available_model).collect(),
+        display_configuration: Some(ModelPickerDisplayConfiguration {
+            routed_model_view_config: Some(RoutedModelViewConfig {
+                hide_routed_model_view: Some(true),
+            }),
+            // Cursor normalizes this marker into explicit nulls that clear
+            // cached Auto toggles instead of retaining omitted properties.
+            named_models_view_config: Some(NamedModelsViewConfig {
+                named_view_to_routed_model_view_no_button: Some(NoRoutedModelButton {}),
+            }),
+        }),
     }
 }
 
@@ -286,26 +316,17 @@ pub async fn usable_models(
     Extension(proxy): Extension<CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
-    let models = registry.store().models().await?;
-    let plugin_models = match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    };
+    let models = registry.store().chat_models().await?;
     tracing::info!(
         model_count = models.len(),
-        plugin_model_count = plugin_models.len(),
-        "appending BYOK models to Cursor GetUsableModels"
+        "publishing BYOK-only models to Cursor GetUsableModels"
     );
     let local = UsableModelsAddition {
-        models: models
-            .iter()
-            .map(usable_model)
-            .chain(plugin_models.iter().map(usable_plugin_model))
-            .collect(),
+        models: models.iter().map(usable_model).collect(),
     }
     .encode_to_vec();
     match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local),
+        Ok(upstream) => replace_response(upstream, local, &[1]),
         Err(error) => {
             tracing::warn!(%error, "Cursor GetUsableModels upstream unavailable; using local catalog");
             Ok(local_response(local))
@@ -316,67 +337,44 @@ pub async fn usable_models(
 pub async fn default_model_for_cli(
     State(registry): State<TransportRegistry>,
 ) -> Result<Response<Body>> {
-    let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
+    let models = registry.store().chat_models().await?;
     Ok(local_response(
         agent::GetDefaultModelForCliResponse {
-            model: default_model_details(&models, &plugin_models),
+            model: default_model_details(&models),
         }
         .encode_to_vec(),
     ))
 }
 
 pub async fn default_model(State(registry): State<TransportRegistry>) -> Result<Response<Body>> {
-    let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
+    let models = registry.store().chat_models().await?;
     Ok(local_response(
-        default_model_response(&models, &plugin_models).encode_to_vec(),
+        default_model_response(&models).encode_to_vec(),
     ))
 }
 
 pub async fn default_model_nudge(
     State(registry): State<TransportRegistry>,
 ) -> Result<Response<Body>> {
-    let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
+    let models = registry.store().chat_models().await?;
     Ok(local_response(
-        default_model_nudge_response(&models, &plugin_models).encode_to_vec(),
+        default_model_nudge_response(&models).encode_to_vec(),
     ))
 }
 
-async fn configured_plugin_models(registry: &TransportRegistry) -> Vec<PluginModelDescriptor> {
-    match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    }
+fn default_model_details(models: &[ModelConfig]) -> Option<agent::ModelDetails> {
+    models.first().map(usable_model)
 }
 
-fn default_model_details(
-    models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
-) -> Option<agent::ModelDetails> {
-    models
-        .first()
-        .map(usable_model)
-        .or_else(|| plugin_models.first().map(usable_plugin_model))
-}
-
-fn default_model_id<'a>(
-    models: &'a [ModelConfig],
-    plugin_models: &'a [PluginModelDescriptor],
-) -> &'a str {
+fn default_model_id<'a>(models: &'a [ModelConfig]) -> &'a str {
     models
         .first()
         .map(|model| model.model_hash.as_str())
-        .or_else(|| plugin_models.first().map(|model| model.id.as_str()))
         .unwrap_or_default()
 }
 
-fn default_model_response(
-    models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
-) -> DefaultModelResponse {
-    let model = default_model_id(models, plugin_models).to_owned();
+fn default_model_response(models: &[ModelConfig]) -> DefaultModelResponse {
+    let model = default_model_id(models).to_owned();
     DefaultModelResponse {
         thinking_model: model.clone(),
         model,
@@ -385,40 +383,48 @@ fn default_model_response(
     }
 }
 
-fn default_model_nudge_response(
-    models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
-) -> DefaultModelNudgeDataResponse {
+fn default_model_nudge_response(models: &[ModelConfig]) -> DefaultModelNudgeDataResponse {
     DefaultModelNudgeDataResponse {
         nudge_date: "0".into(),
         should_default_switch_on_new_chat: false,
         models_with_no_default_switch: models
             .iter()
             .map(|model| model.model_hash.clone())
-            .chain(plugin_models.iter().map(|model| model.id.clone()))
             .collect(),
         conversion_model_override: String::new(),
     }
 }
 
-fn merge_response(upstream: proxy::BufferedResponse, extra: Vec<u8>) -> Result<Response<Body>> {
+fn replace_response(
+    upstream: proxy::BufferedResponse,
+    local: Vec<u8>,
+    replaced_fields: &[u32],
+) -> Result<Response<Body>> {
     if !upstream.status.is_success() {
         tracing::warn!(status = %upstream.status, "Cursor model catalog upstream rejected request; using local catalog");
-        return Ok(local_response(extra));
+        return Ok(local_response(local));
     }
-    let (framed, payload) = unary_payload(&upstream.body)?;
+    let (framed, mut payload) = unary_payload(&upstream.body)?;
+    // Replace the catalog rather than concatenating repeated model fields.
+    // Keep unknown metadata intact so Cursor retains its other configuration.
+    let mut catalog = BytesMut::with_capacity(payload.len() + local.len());
+    while !payload.is_empty() {
+        let field = payload;
+        let (tag, wire_type) = prost::encoding::decode_key(&mut payload)?;
+        prost::encoding::skip_field(wire_type, tag, &mut payload, Default::default())?;
+        if !replaced_fields.contains(&tag) {
+            catalog.extend_from_slice(&field[..field.len() - payload.len()]);
+        }
+    }
+    catalog.extend_from_slice(&local);
     let body = if framed {
-        let mut merged = BytesMut::with_capacity(5 + payload.len() + extra.len());
-        merged.put_u8(0);
-        merged.put_u32((payload.len() + extra.len()) as u32);
-        merged.extend_from_slice(payload);
-        merged.extend_from_slice(&extra);
-        merged.freeze()
+        let mut body = BytesMut::with_capacity(5 + catalog.len());
+        body.put_u8(0);
+        body.put_u32(catalog.len() as u32);
+        body.extend_from_slice(&catalog);
+        body.freeze()
     } else {
-        let mut merged = BytesMut::with_capacity(payload.len() + extra.len());
-        merged.extend_from_slice(payload);
-        merged.extend_from_slice(&extra);
-        merged.freeze()
+        catalog.freeze()
     };
     Ok(upstream.with_body(body))
 }
@@ -444,7 +450,7 @@ fn unary_payload(body: &Bytes) -> Result<(bool, &[u8])> {
     }
     if flags != 0 {
         return Err(Error::Protocol(format!(
-            "cannot merge compressed or terminal model catalog frame: flags={flags}"
+            "invalid Cursor model catalog frame: flags={flags}"
         )));
     }
     Ok((true, &body[5..]))
@@ -453,13 +459,7 @@ fn unary_payload(body: &Bytes) -> Result<(bool, &[u8])> {
 fn available_model(model: &ModelConfig) -> AvailableModel {
     let contexts = context_options(model.context_window_tokens);
     let tooltip = model_tooltip(model);
-    let variants = model_variants(
-        &model.model_hash,
-        &model.display_name,
-        &tooltip,
-        &contexts,
-        true,
-    );
+    let variants = model_variants(model, &tooltip, &contexts, true);
     let legacy_slugs = variants
         .iter()
         .filter_map(|variant| variant.legacy_slug.clone())
@@ -580,37 +580,39 @@ fn model_parameters(
 }
 
 fn model_variants(
-    name: &str,
-    display_name: &str,
+    model: &ModelConfig,
     tooltip: &TooltipData,
     contexts: &[(String, String)],
     thinking: bool,
 ) -> Vec<ModelVariant> {
-    // 非思考模型没有 Effort 轴,变体网格只剩 Context × Fast。
-    let efforts: &[Option<(&str, &str)>] = if thinking {
-        &[
-            Some(EFFORTS[0]),
-            Some(EFFORTS[1]),
-            Some(EFFORTS[2]),
-            Some(EFFORTS[3]),
-            Some(EFFORTS[4]),
-        ]
+    let efforts: Vec<_> = if thinking {
+        EFFORTS.into_iter().map(Some).collect()
     } else {
-        &[None]
+        vec![None]
     };
+    let mut defaults = crate::model::ModelSpec::new(&model.model_hash);
+    model.configure(&mut defaults);
+    let default_context = defaults.context_window_tokens.unwrap_or(200_000);
+    let default_effort = defaults.reasoning.effort.as_deref().unwrap_or("default");
     let mut variants = Vec::with_capacity(contexts.len() * efforts.len() * 2);
     for (context, context_name) in contexts {
-        for effort in efforts {
+        for effort in &efforts {
             for fast in [false, true] {
-                variants.push(model_variant(
-                    name,
-                    display_name,
+                let mut variant = model_variant(
+                    &model.model_hash,
+                    &model.display_name,
                     tooltip,
                     context,
                     context_name,
                     *effort,
                     fast,
-                ));
+                );
+                let is_default = parse_token_count(context) == Some(default_context)
+                    && !fast
+                    && effort.is_none_or(|(value, _)| value == default_effort);
+                variant.is_default_max_config = is_default.then_some(true);
+                variant.is_default_non_max_config = is_default.then_some(true);
+                variants.push(variant);
             }
         }
     }
@@ -644,8 +646,6 @@ fn model_variant(
             "{display_name} <span style=\"color: var(--cursor-text-tertiary);\">{suffix}</span>"
         )
     };
-    let is_default =
-        context == DEFAULT_CONTEXT && !fast && effort.is_none_or(|(effort, _)| effort == "high");
     let mut parameter_values = vec![ModelParameterValue {
         id: "context".into(),
         value: context.into(),
@@ -664,8 +664,8 @@ fn model_variant(
         parameter_values,
         display_name: display_name.clone(),
         is_max_mode: false,
-        is_default_max_config: is_default.then_some(true),
-        is_default_non_max_config: is_default.then_some(true),
+        is_default_max_config: None,
+        is_default_non_max_config: None,
         tooltip_data: Some(tooltip.clone()),
         display_name_outside_picker: Some(display_name),
         variant_string_representation: Some(match effort {
@@ -690,69 +690,11 @@ fn model_tooltip(model: &ModelConfig) -> TooltipData {
     }
 }
 
-fn available_plugin_model(model: &PluginModelDescriptor) -> AvailableModel {
-    let tooltip = TooltipData {
-        markdown_content: model.description.clone(),
-    };
-    // Effort 与上下文档位由宿主统一提供,与内置模型一致;插件不再声明这两项。
-    let contexts = context_options(None);
-    let variants = model_variants(&model.id, &model.display_name, &tooltip, &contexts, true);
-    let legacy_slugs = variants
-        .iter()
-        .filter_map(|variant| variant.legacy_slug.clone())
-        .collect();
-    AvailableModel {
-        name: model.id.clone(),
-        default_on: true,
-        supports_agent: Some(true),
-        degradation_status: Some(0),
-        tooltip_data: Some(tooltip.clone()),
-        supports_thinking: Some(true),
-        supports_images: Some(model.images),
-        supports_max_mode: Some(false),
-        client_display_name: Some(model.display_name.clone()),
-        server_model_name: Some(model.id.clone()),
-        supports_non_max_mode: Some(true),
-        tooltip_data_for_max_mode: Some(tooltip.clone()),
-        is_recommended_for_background_composer: Some(false),
-        supports_plan_mode: Some(true),
-        inputbox_short_model_name: Some(model.display_name.clone()),
-        supports_sandboxing: Some(true),
-        supports_cmd_k: Some(false),
-        parameter_definitions: model_parameters(&contexts, true),
-        variants,
-        legacy_slugs,
-        named_model_section_index: Some(1),
-        vendor_name: Some(model.provider_type.clone()),
-        vendor: Some(AvailableModelVendor {
-            id: 6,
-            display_name: model.provider_type.clone(),
-        }),
-        model_picker_badges: vec![ModelPickerBadge {
-            label: model.plugin_name.clone(),
-            variant: 1,
-            dismiss_on_selection: false,
-        }],
-    }
-}
-
 fn cli_local_model_credentials() -> agent::model_details::Credentials {
     agent::model_details::Credentials::ApiKeyCredentials(agent::ApiKeyCredentials {
         api_key: CLI_LOCAL_MODEL_API_KEY.into(),
         base_url: None,
     })
-}
-
-fn usable_plugin_model(model: &PluginModelDescriptor) -> agent::ModelDetails {
-    agent::ModelDetails {
-        model_id: model.id.clone(),
-        display_model_id: model.id.clone(),
-        display_name: model.display_name.clone(),
-        display_name_short: model.display_name.clone(),
-        thinking_details: Some(agent::ThinkingDetails::default()),
-        credentials: Some(cli_local_model_credentials()),
-        ..Default::default()
-    }
 }
 
 fn usable_model(model: &ModelConfig) -> agent::ModelDetails {
@@ -802,6 +744,453 @@ mod tests {
         }
     }
 
+    fn default_selection(
+        model: &ModelConfig,
+    ) -> crate::cursor::protocol::proto::inference::InferenceRequestedModel {
+        use crate::cursor::protocol::proto::inference as pb;
+        let catalog = available_model(model);
+        let catalog = AvailableModel::decode(catalog.encode_to_vec().as_slice()).unwrap();
+        let defaults: Vec<_> = catalog
+            .variants
+            .iter()
+            .filter(|variant| variant.is_default_non_max_config == Some(true))
+            .collect();
+        assert_eq!(defaults.len(), 1, "each model needs exactly one default");
+        assert_eq!(defaults[0].is_default_max_config, Some(true));
+        for parameter in &defaults[0].parameter_values {
+            let definition = catalog
+                .parameter_definitions
+                .iter()
+                .find(|definition| definition.id == parameter.id)
+                .unwrap();
+            let kind = definition.parameter_type.as_ref().unwrap();
+            assert!(
+                kind.enum_parameter.as_ref().is_some_and(|values| values
+                    .values
+                    .iter()
+                    .any(|value| value.value == parameter.value))
+                    || kind.boolean_parameter.as_ref().is_some_and(|values| values
+                        .values
+                        .iter()
+                        .any(|value| value.value == parameter.value))
+            );
+        }
+        pb::InferenceRequestedModel {
+            model_id: model.model_hash.clone(),
+            parameters: defaults[0]
+                .parameter_values
+                .iter()
+                .map(|parameter| pb::InferenceModelParameterValue {
+                    id: parameter.id.clone(),
+                    value: parameter.value.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn catalog_default_selection_preserves_saved_context_and_effort() {
+        use crate::cursor::{
+            inference::{invocation, prompt_metadata},
+            protocol::proto::inference as pb,
+        };
+        for (model_type, endpoint) in [
+            (ModelType::OpenAi, OPENAI_CHAT_ENDPOINT),
+            (ModelType::OpenAi, crate::model::OPENAI_RESPONSES_ENDPOINT),
+            (ModelType::Anthropic, ""),
+        ] {
+            for context in [128_000, 200_000, 1_000_000] {
+                let mut configured = model();
+                configured.model_type = model_type;
+                configured.openai_endpoint = endpoint.into();
+                configured.context_window_tokens = Some(context);
+                configured.reasoning_effort = Some("low".into());
+                configured.anthropic_thinking_effort = Some("medium".into());
+                let selected = default_selection(&configured);
+                let metadata = prompt_metadata(
+                    &pb::RunInferenceRunRequest {
+                        requested_model: Some(selected.clone()),
+                        ..Default::default()
+                    },
+                    Some(&configured),
+                    std::slice::from_ref(&configured),
+                );
+                let mut input = invocation(
+                    &pb::InferenceStreamRequest {
+                        requested_model: Some(selected),
+                        ..Default::default()
+                    },
+                    &configured.model_hash,
+                    "conversation",
+                    "run",
+                    "call",
+                    0,
+                )
+                .unwrap();
+                configured.configure(&mut input.request.model);
+                let effort = if model_type == ModelType::Anthropic {
+                    "medium"
+                } else {
+                    "low"
+                };
+                assert_eq!(metadata.agent_token_limit, Some(context as i32));
+                assert_eq!(metadata.reasoning_effort.as_deref(), Some(effort));
+                assert_eq!(input.request.model.context_window_tokens, Some(context));
+                assert_eq!(
+                    input.request.model.reasoning.effort.as_deref(),
+                    Some(effort)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_default_does_not_force_reasoning_when_unconfigured() {
+        use crate::cursor::{
+            inference::{invocation, prompt_metadata},
+            protocol::proto::inference as pb,
+        };
+        let configured = model();
+        let selected = default_selection(&configured);
+        let metadata = prompt_metadata(
+            &pb::RunInferenceRunRequest {
+                requested_model: Some(selected.clone()),
+                ..Default::default()
+            },
+            Some(&configured),
+            std::slice::from_ref(&configured),
+        );
+        let mut input = invocation(
+            &pb::InferenceStreamRequest {
+                requested_model: Some(selected),
+                ..Default::default()
+            },
+            &configured.model_hash,
+            "conversation",
+            "run",
+            "call",
+            0,
+        )
+        .unwrap();
+        configured.configure(&mut input.request.model);
+        assert_eq!(metadata.agent_token_limit, Some(200_000));
+        assert!(metadata.reasoning_effort.is_none());
+        assert!(input.request.model.reasoning.effort.is_none());
+        assert!(!input.request.model.reasoning.enabled);
+        let catalog = available_model(&configured);
+        assert!(catalog
+            .parameter_definitions
+            .iter()
+            .any(|parameter| parameter.id == "reasoning"));
+        assert!(catalog.variants.iter().any(|variant| variant
+            .parameter_values
+            .iter()
+            .any(|parameter| parameter.id == "reasoning" && parameter.value == "high")));
+    }
+
+    #[tokio::test]
+    async fn catalog_choices_reach_all_three_provider_requests() {
+        use crate::{
+            config::{ProviderConfig, ProviderKind},
+            cursor::{inference::invocation, protocol::proto::inference as pb},
+            provider::build_provider,
+        };
+        use axum::{routing::post, Json, Router};
+        use futures_util::StreamExt;
+        use serde_json::Value;
+        use tokio_util::sync::CancellationToken;
+
+        for (model_type, endpoint, kind, response) in [
+            (ModelType::OpenAi, OPENAI_CHAT_ENDPOINT, ProviderKind::OpenAiChat,
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
+            (ModelType::OpenAi, crate::model::OPENAI_RESPONSES_ENDPOINT, ProviderKind::OpenAiResponses,
+                "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"),
+            (ModelType::Anthropic, "", ProviderKind::Anthropic,
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"),
+        ] {
+            for (saved, selection, expected) in [
+                (Some("low"), None, Some("low")),
+                (None, None, None),
+                (Some("low"), Some("high"), Some("high")),
+                (Some("low"), Some("default"), Some("low")),
+            ] {
+                let mut configured = model();
+                configured.model_type = model_type;
+                configured.openai_endpoint = endpoint.into();
+                configured.context_window_tokens = Some(128_000);
+                configured.reasoning_effort = saved.map(str::to_owned);
+                configured.anthropic_thinking_effort = saved.map(str::to_owned);
+                let mut selected = default_selection(&configured);
+                if let Some(selection) = selection {
+                    selected.parameters.iter_mut().find(|p| p.id == "reasoning").unwrap().value = selection.into();
+                }
+                let mut input = invocation(&pb::InferenceStreamRequest {
+                    requested_model: Some(selected), ..Default::default()
+                }, &configured.model_hash, "conversation", "run", "call", 0).unwrap();
+                configured.configure(&mut input.request.model);
+                assert_eq!(input.request.model.context_window_tokens, Some(128_000));
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let app = Router::new().route("/", post(move |Json(body): Json<Value>| {
+                    let sender = sender.clone();
+                    async move {
+                        sender.send(body).unwrap();
+                        ([("content-type", "text/event-stream")], response)
+                    }
+                }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+                let provider = build_provider(&ProviderConfig {
+                    kind: kind.clone(),
+                    request_url: format!("http://{address}/"),
+                    api_key: "test-key".into(),
+                    custom_headers: Default::default(),
+                    max_output_tokens: Some(2048),
+                    request_timeout: std::time::Duration::from_secs(5),
+                    allowed_body_fields: None,
+                }).unwrap();
+                let mut stream = provider.stream(input, CancellationToken::new());
+                while let Some(event) = stream.next().await { event.unwrap(); }
+                let body = receiver.recv().await.unwrap();
+                server.abort();
+                let actual = match kind {
+                    ProviderKind::OpenAiChat => body["reasoning_effort"].as_str(),
+                    ProviderKind::OpenAiResponses => body["reasoning"]["effort"].as_str(),
+                    ProviderKind::Anthropic => body["output_config"]["effort"].as_str(),
+                };
+                assert_eq!(actual, expected, "{kind:?}: saved={saved:?}, selection={selection:?}");
+                if expected.is_none() {
+                    assert!(body.get("reasoning_effort").is_none());
+                    assert!(body.get("reasoning").is_none());
+                    assert!(body.get("thinking").is_none());
+                    assert!(body.get("output_config").is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_effort_call_record_matches_routed_request() {
+        use crate::{
+            cursor::{inference::invocation, protocol::proto::inference as pb},
+            model::ModelConfigInput,
+            network::NetworkClients,
+            provider::{Provider, ProviderRouter},
+            store::Store,
+        };
+        use axum::{routing::post, Json, Router};
+        use futures_util::StreamExt;
+        use serde_json::{json, Value};
+        use tokio_util::sync::CancellationToken;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| {
+                let sender = sender.clone();
+                async move {
+                    sender.send(body).unwrap();
+                    (
+                        [("content-type", "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::connect(&format!(
+            "sqlite://{}",
+            dir.path().join("test.db").display()
+        ))
+        .await
+        .unwrap();
+        let input: ModelConfigInput = serde_json::from_value(json!({
+            "type":"openai", "display_name":"Test", "base_url":format!("http://{address}/"),
+            "use_full_url":true, "api_key":"test-key", "tooltip_data":"Test",
+            "model_id":"test-model", "reasoning_effort":"low", "openai_endpoint":OPENAI_CHAT_ENDPOINT,
+        })).unwrap();
+        let configured = store.create_model(&input).await.unwrap();
+        let mut selected = default_selection(&configured);
+        selected
+            .parameters
+            .iter_mut()
+            .find(|p| p.id == "reasoning")
+            .unwrap()
+            .value = "default".into();
+        let input = invocation(
+            &pb::InferenceStreamRequest {
+                requested_model: Some(selected),
+                ..Default::default()
+            },
+            &configured.model_hash,
+            "conversation",
+            "run",
+            "call",
+            0,
+        )
+        .unwrap();
+        let timeout = std::time::Duration::from_secs(5);
+        let provider = ProviderRouter::new(
+            store.clone(),
+            NetworkClients::new(store.clone()),
+            timeout,
+            timeout,
+        );
+        let mut stream = provider.stream(input, CancellationToken::new());
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let body = receiver.recv().await.unwrap();
+        server.abort();
+        assert_eq!(body["reasoning_effort"], "low");
+        let call = store.llm_call("run:call").await.unwrap().unwrap();
+        assert_eq!(call.reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct CatalogMetadata {
+        #[prost(bool, tag = "11")]
+        use_model_parameters: bool,
+        #[prost(string, tag = "88")]
+        unrelated_metadata: String,
+        #[prost(bytes, tag = "15")]
+        display_configuration: Vec<u8>,
+        #[prost(string, optional, tag = "19")]
+        experimental_model_id: Option<String>,
+        #[prost(string, optional, tag = "21")]
+        nudge_new_chats_to_auto_optimize_for: Option<String>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct PickerConfigurationFixture {
+        #[prost(message, optional, tag = "1")]
+        routed_model_view_config: Option<RoutedModelViewConfig>,
+        #[prost(bytes, tag = "2")]
+        named_models_view_config: Vec<u8>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct NamedPickerConfigurationFixture {
+        #[prost(bytes, optional, tag = "2")]
+        auto_toggle: Option<Vec<u8>>,
+        #[prost(bytes, optional, tag = "3")]
+        no_button: Option<Vec<u8>>,
+    }
+
+    fn upstream_catalog(payload: &[u8], framed: bool) -> proxy::BufferedResponse {
+        let body = if framed {
+            let mut body = BytesMut::new();
+            body.put_u8(0);
+            body.put_u32(payload.len() as u32);
+            body.extend_from_slice(payload);
+            body.freeze()
+        } else {
+            Bytes::copy_from_slice(payload)
+        };
+        proxy::BufferedResponse {
+            status: StatusCode::OK,
+            headers: Default::default(),
+            body,
+        }
+    }
+
+    #[tokio::test]
+    async fn available_catalog_refresh_replaces_official_models_and_preserves_metadata() {
+        let local = available_catalog(&[model()]).encode_to_vec();
+        let mut official = model();
+        official.model_hash = "official-model".into();
+        let mut upstream = AvailableModelsAddition {
+            model_names: vec![official.model_hash.clone()],
+            models: vec![available_model(&official)],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let metadata = CatalogMetadata {
+            use_model_parameters: true,
+            unrelated_metadata: "preserve-future-cursor-fields".into(),
+            display_configuration: PickerConfigurationFixture {
+                routed_model_view_config: None,
+                // NamedModelsViewConfig.named_view_to_routed_model_view_toggle.
+                named_models_view_config: vec![0x12, 0],
+            }
+            .encode_to_vec(),
+            experimental_model_id: Some("official-experimental-model".into()),
+            nudge_new_chats_to_auto_optimize_for: Some("speed".into()),
+        };
+        upstream.extend(metadata.encode_to_vec());
+        for framed in [false, true] {
+            let mut payload = upstream.clone();
+            for _ in 0..3 {
+                let response = replace_response(
+                    upstream_catalog(&payload, framed),
+                    local.clone(),
+                    &[1, 2, 15, 19, 20, 21],
+                )
+                .unwrap();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let (is_framed, bytes) = unary_payload(&body).unwrap();
+                assert_eq!(is_framed, framed);
+                let catalog = AvailableModelsAddition::decode(bytes).unwrap();
+                assert_eq!(catalog.model_names, ["local-model-hash"]);
+                assert_eq!(catalog.models.len(), 1);
+                assert_eq!(catalog.models[0].name, "local-model-hash");
+                assert!(!catalog.models[0].variants.is_empty());
+                let actual = CatalogMetadata::decode(bytes).unwrap();
+                assert_eq!(actual.use_model_parameters, metadata.use_model_parameters);
+                assert_eq!(actual.unrelated_metadata, metadata.unrelated_metadata);
+                assert!(actual.experimental_model_id.is_none());
+                assert!(actual.nudge_new_chats_to_auto_optimize_for.is_none());
+                let picker =
+                    PickerConfigurationFixture::decode(actual.display_configuration.as_slice())
+                        .unwrap();
+                assert_eq!(
+                    picker
+                        .routed_model_view_config
+                        .unwrap()
+                        .hide_routed_model_view,
+                    Some(true)
+                );
+                let named = NamedPickerConfigurationFixture::decode(
+                    picker.named_models_view_config.as_slice(),
+                )
+                .unwrap();
+                assert!(named.auto_toggle.is_none());
+                assert!(named.no_button.is_some());
+                payload = bytes.to_vec();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn usable_catalog_replaces_official_models_even_when_local_catalog_is_empty() {
+        let official = UsableModelsAddition {
+            models: vec![agent::ModelDetails {
+                model_id: "official-model".into(),
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        for models in [vec![usable_model(&model())], vec![]] {
+            let local = UsableModelsAddition {
+                models: models.clone(),
+            }
+            .encode_to_vec();
+            let response =
+                replace_response(upstream_catalog(&official, false), local, &[1]).unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(UsableModelsAddition::decode(body).unwrap().models, models);
+        }
+    }
+
     #[test]
     fn cli_model_details_use_local_routing_credentials() {
         let details = usable_model(&model());
@@ -818,42 +1207,16 @@ mod tests {
     }
 
     #[test]
-    fn cli_plugin_model_details_use_local_routing_credentials() {
-        let details = usable_plugin_model(&PluginModelDescriptor {
-            id: "plugin:test/provider/model".into(),
-            plugin_id: "plugin:test".into(),
-            plugin_name: "Test Plugin".into(),
-            provider_id: "provider".into(),
-            model_id: "model".into(),
-            display_name: "Plugin Model".into(),
-            description: None,
-            icon: String::new(),
-            provider_type: "test".into(),
-            max_output_tokens: None,
-            images: false,
-            enabled: true,
-        });
-        assert_eq!(details.model_id, "plugin:test/provider/model");
-        let agent::model_details::Credentials::ApiKeyCredentials(credentials) =
-            details.credentials.expect("API credentials")
-        else {
-            panic!("expected API key credentials");
-        };
-        assert_eq!(credentials.api_key, CLI_LOCAL_MODEL_API_KEY);
-        assert_eq!(credentials.base_url, None);
-    }
-
-    #[test]
     fn cli_default_responses_use_the_local_model_hash() {
         let models = vec![model()];
-        let details = default_model_details(&models, &[]).expect("default model");
+        let details = default_model_details(&models).expect("default model");
         assert_eq!(details.model_id, "local-model-hash");
 
-        let response = default_model_response(&models, &[]);
+        let response = default_model_response(&models);
         assert_eq!(response.model, "local-model-hash");
         assert_eq!(response.thinking_model, "local-model-hash");
 
-        let nudge = default_model_nudge_response(&models, &[]);
+        let nudge = default_model_nudge_response(&models);
         assert_eq!(
             nudge.models_with_no_default_switch,
             vec!["local-model-hash"]

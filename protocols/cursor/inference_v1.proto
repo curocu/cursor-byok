@@ -1,4 +1,4 @@
-// Extracted from Cursor 3.27.22 Agent harness b951911e4476.
+// Extracted from the installed Cursor Agent harness.
 // Wire contracts only; no application code is executed or embedded.
 syntax = "proto3";
 package cursorbyok.inference;
@@ -131,6 +131,7 @@ message InferenceCoreMessage {
   optional string anthropic_native_content = 18;
   optional string lineage_tag = 19;
   optional string cursor_request_id = 20;
+  optional string cursor_output_effort = 22;
   oneof content {
     string text = 2;
     InferenceContentParts parts = 3;
@@ -143,6 +144,7 @@ message InferenceCursorOptions {
   optional string image_description = 1;
   map<int32, string> image_descriptions = 2;
   optional string image_content_sha256 = 3;
+  optional bool tool_call_refused = 4;
 }
 
 // aiserver.v1.InferenceCustomToolFormat
@@ -160,6 +162,7 @@ message InferenceExtendedUsageInfo {
   int32 cache_write_tokens = 4;
   int32 max_tokens = 5;
   optional int32 reasoning_tokens = 6;
+  optional int32 context_input_tokens = 7;
 }
 
 // aiserver.v1.InferenceExtraData
@@ -274,6 +277,7 @@ enum InferenceReason {
   INFERENCEREASON_UNSPECIFIED = 0;
   INFERENCEREASON_GEMINI_VIDEO_SUBAGENT = 1;
   INFERENCEREASON_GROK_BOT_PROACTIVITY_SUBAGENT = 2;
+  INFERENCEREASON_GROK_BOT_PROMPT_CACHE_KEEPALIVE = 3;
 }
 
 // aiserver.v1.InferenceReasoningPart
@@ -382,6 +386,7 @@ message InferenceStreamRequest {
   optional InferenceCompactionTrigger compaction_trigger = 27;
   optional bool automation_next_run_within_hour = 28;
   optional bool automation_previous_run_within_hour = 29;
+  optional bool automation_conversation_call = 30;
 }
 
 // aiserver.v1.InferenceStreamResponse
@@ -546,6 +551,17 @@ message RunInferenceClientFirstCallTimings {
   optional double frame_encoded_to_write_settled_ms = 14;
   optional uint32 frame_bytes = 15;
   optional string prewarm_skip_reason = 16;
+  optional double prep_state_restore_ms = 17;
+  optional double prep_root_prompt_restore_ms = 18;
+  optional double prep_request_context_ms = 19;
+  optional double prep_system_prompt_ms = 20;
+  optional double prep_pre_turn_snapshot_ms = 21;
+  optional double prep_pre_turn_snapshot_wait_ms = 22;
+  optional double prep_pre_turn_snapshot_blob_writes_ms = 23;
+  optional double prep_pre_turn_snapshot_serialize_ms = 24;
+  optional double prep_first_step_to_first_invocation_ms = 25;
+  optional uint32 prep_prompt_message_count = 26;
+  optional uint32 prep_turn_count = 27;
 }
 
 // aiserver.v1.RunInferenceClientHeartbeat
@@ -772,6 +788,7 @@ message RunInferencePromptModelMetadata {
   optional bool stamp_image_content_sha256 = 58;
   optional bool smart_mode_classifier_invoked_files = 59;
   optional string prompt_key = 60;
+  optional string cursor_router_setting = 61;
 }
 
 // aiserver.v1.RunInferenceRequestCompression
@@ -815,6 +832,13 @@ message RunInferenceResolvedSubagentModelOverride {
   optional string model_id = 3;
 }
 
+// aiserver.v1.RunInferenceRoutedSpeculation
+enum RunInferenceRoutedSpeculation {
+  RUNINFERENCEROUTEDSPECULATION_UNSPECIFIED = 0;
+  RUNINFERENCEROUTEDSPECULATION_SHADOW = 1;
+  RUNINFERENCEROUTEDSPECULATION_SPECULATE = 2;
+}
+
 // aiserver.v1.RunInferenceRoutingMessage
 message RunInferenceRoutingMessage {
   RunInferenceRoutingRole role = 1;
@@ -856,6 +880,8 @@ message RunInferenceRunReady {
   RunInferencePromptCacheRefillConfig prompt_cache_refill = 25;
   optional string labeling_usage_token = 26;
   bool accepts_delta_base_seeds = 27;
+  RunInferenceRoutedSpeculation routed_speculation = 29;
+  optional string silent_slide_notice = 30;
 }
 
 // aiserver.v1.RunInferenceRunRequest

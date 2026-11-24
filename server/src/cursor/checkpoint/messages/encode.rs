@@ -50,6 +50,7 @@ pub fn staged_tool_round(
         message_id: assistant.model_call_id.clone(),
         role: Role::Assistant,
         content: ProjectedContent::Assistant {
+            parts: Vec::new(),
             text: assistant.text.clone(),
             thinking: assistant.thinking.clone(),
             replay_state: assistant.replay_state.clone(),
@@ -213,6 +214,7 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
             thinking,
             replay_state,
             calls,
+            ..
         } => {
             let mut parts = Vec::new();
             if !thinking.is_empty() || replay_state.is_some() {

@@ -1172,7 +1172,7 @@ checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
 name = "cursor-byok-desktop"
-version = "1.0.6"
+version = "1.0.24"
 dependencies = [
  "axum",
  "cursor-server",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "cursor-server"
-version = "0.1.0"
+version = "1.0.24"
 dependencies = [
  "async-stream",
  "axum",
@@ -1254,7 +1254,6 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "x509-parser",
- "zip",
 ]
 
 [[package]]
@@ -5219,6 +5218,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",

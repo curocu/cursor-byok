@@ -92,6 +92,7 @@ impl Provider for AnthropicProvider {
             }
             let attempt = send_once(
                 "Anthropic",
+                &config.api_key,
                 || client.post(&config.request_url)
                     .header("x-api-key", &config.api_key).header("anthropic-version", "2023-06-01")
                     .headers(config.custom_headers.clone())
@@ -362,6 +363,7 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                         "type": "tool_result",
                         "tool_use_id": result.call_id,
                         "content": content,
+                        "is_error": result.is_error,
                     })],
                 );
             }
@@ -505,6 +507,49 @@ pub(crate) fn anthropic_usage(value: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_results_preserve_error_flags_and_multimodal_content() {
+        for is_error in [true, false] {
+            for with_image in [false, true] {
+                let messages = vec![ProjectedMessage {
+                    message_id: "result".into(),
+                    role: Role::Tool,
+                    content: ProjectedContent::ToolResult(crate::model::ToolResultContent {
+                        call_id: "tool-call".into(),
+                        name: "Task".into(),
+                        content: "tool result".into(),
+                        is_error,
+                        image: None,
+                        provider_parts: if with_image {
+                            vec![
+                                ContentPart::Text {
+                                    text: "tool result".into(),
+                                },
+                                ContentPart::Image {
+                                    mime_type: "image/png".into(),
+                                    data: vec![1, 2, 3],
+                                },
+                            ]
+                        } else {
+                            Vec::new()
+                        },
+                    }),
+                }];
+                let body = anthropic_messages(&messages).unwrap();
+                let result = &body[0]["content"][0];
+                assert_eq!(body[0]["role"], "user");
+                assert_eq!(result["tool_use_id"], "tool-call");
+                assert_eq!(result["is_error"], is_error);
+                if with_image {
+                    assert_eq!(result["content"][0]["text"], "tool result");
+                    assert_eq!(result["content"][1]["source"]["data"], "AQID");
+                } else {
+                    assert_eq!(result["content"], "tool result");
+                }
+            }
+        }
+    }
 
     #[test]
     fn cached_tokens_are_included_once_in_anthropic_context_input() {

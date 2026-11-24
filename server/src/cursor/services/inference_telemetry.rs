@@ -45,7 +45,6 @@ pub async fn record(
     };
     let model = model.as_deref().unwrap_or_default();
     let local = local_app::request_uses_local_cursor_token(&parts.headers)
-        || model.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
         || registry.store().model(model).await?.is_some();
     if local {
         // Both official methods return google.protobuf.Empty. Local provider

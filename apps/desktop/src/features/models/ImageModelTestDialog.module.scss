@@ -1,0 +1,25 @@
+.form {
+  display: grid;
+  gap: 16px;
+}
+
+.prompt {
+  width: 100%;
+  min-height: 150px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-sideBar-border));
+  border-radius: 6px;
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+
+  &:focus { outline: 1px solid var(--vscode-focusBorder); }
+}
+
+.hint {
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.6;
+}

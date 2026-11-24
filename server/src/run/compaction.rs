@@ -327,6 +327,7 @@ mod tests {
             message_id: id.into(),
             role: Role::Assistant,
             content: ProjectedContent::Assistant {
+                parts: Vec::new(),
                 text: text.into(),
                 thinking: String::new(),
                 replay_state: None,

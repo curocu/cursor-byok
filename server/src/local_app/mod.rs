@@ -1,7 +1,6 @@
 //! Exposes the local desktop application integration.
 mod account;
 mod ca;
-mod process;
 mod proxy;
 mod settings;
 
@@ -181,19 +180,8 @@ impl CursorHarness {
             .read()
             .ok_or_else(|| Error::Config("desktop management server is not ready".into()))?;
         let mut proxy = self.inner.proxy.lock().await;
-        let settings_applied = proxy
-            .url()
-            .as_deref()
-            .map(settings::settings_match)
-            .transpose()?
-            .unwrap_or(false);
-        if !settings_applied {
-            // Terminating Cursor only makes the freshly written http.proxy take effect
-            // sooner; it is optional, so a failed probe or kill must not block takeover.
-            if let Err(error) = process::terminate_cursor().await {
-                tracing::warn!(%error, "could not terminate Cursor before applying proxy settings");
-            }
-        }
+        // Cursor watches its proxy settings. Rebind the persisted proxy port and
+        // apply configuration without terminating the user's running editor.
         if proxy.running() {
             if let Some(url) = proxy.url() {
                 apply_cursor_configuration(&url).await?;

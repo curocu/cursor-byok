@@ -8,7 +8,8 @@ use serde_json::{json, Map, Value};
 use crate::{
     config::ProviderConfig,
     model::{
-        ContentPart, ModelInvocation, ModelLatency, ProjectedContent, ProjectedMessage, Role, Usage,
+        AssistantPart, ContentPart, ModelInvocation, ModelLatency, ProjectedContent,
+        ProjectedMessage, Role, Usage,
     },
     Error, Result,
 };
@@ -91,6 +92,7 @@ impl Provider for OpenAiResponsesProvider {
             }
             let attempt = send_once(
                 "OpenAI Responses",
+                &config.api_key,
                 || client.post(&config.request_url)
                     .bearer_auth(&config.api_key).headers(config.custom_headers.clone()).json(&body),
                 &cancellation,
@@ -112,7 +114,8 @@ impl Provider for OpenAiResponsesProvider {
             let source = chunks.eventsource();
             futures_util::pin_mut!(source);
             let mut text_open = false;
-            let mut text = String::new();
+            let mut texts = std::collections::BTreeMap::<(u64, u64), String>::new();
+            let mut active_text = None;
             let mut thinking_open = false;
             let mut tools = std::collections::BTreeMap::<usize, ResponseToolState>::new();
             let mut reasoning_items = Vec::new();
@@ -135,15 +138,17 @@ impl Provider for OpenAiResponsesProvider {
                 match kind {
                     "response.output_text.delta" => {
                         if thinking_open { thinking_open = false; yield ModelEvent::ThinkingEnd; }
-                        if !text_open { text_open = true; yield ModelEvent::TextStart; }
+                        let key = response_text_key(&value);
+                        if text_open && active_text != Some(key) { text_open = false; yield ModelEvent::TextEnd; }
+                        if !text_open { text_open = true; active_text = Some(key); yield ModelEvent::TextStart; }
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                            text.push_str(delta);
+                            texts.entry(key).or_default().push_str(delta);
                             yield ModelEvent::TextDelta(delta.into());
                         }
                     }
                     "response.output_text.done" => {
                         if let Some(final_text) = value.get("text").and_then(Value::as_str) {
-                            for event in reconcile_response_text(&mut text_open, &mut text, final_text) { yield event; }
+                            for event in reconcile_response_text(&mut text_open, &mut active_text, &mut texts, response_text_key(&value), final_text)? { yield event; }
                         }
                         if text_open { text_open = false; yield ModelEvent::TextEnd; }
                     }
@@ -166,12 +171,16 @@ impl Provider for OpenAiResponsesProvider {
                         match item.get("type").and_then(Value::as_str) {
                             Some("reasoning") => {
                                 if thinking_open { thinking_open = false; yield ModelEvent::ThinkingEnd; }
+                                yield ModelEvent::ReasoningReplayState(crate::model::ProviderReplayState {
+                                    provider_kind: "openai_responses".into(), value: json!({"items":[item]}),
+                                });
                                 reasoning_items.push(item.clone());
                             }
                             Some("message") => {
                                 saw_completed_item = true;
-                                if let Some(final_text) = response_item_text(item) {
-                                    for event in reconcile_response_text(&mut text_open, &mut text, &final_text) { yield event; }
+                                let output_index = value.get("output_index").and_then(Value::as_u64).unwrap_or_default();
+                                for (content_index, final_text) in response_item_texts(item) {
+                                    for event in reconcile_response_text(&mut text_open, &mut active_text, &mut texts, (output_index, content_index), final_text)? { yield event; }
                                 }
                                 if text_open { text_open = false; yield ModelEvent::TextEnd; }
                             }
@@ -273,33 +282,60 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
-fn response_item_text(item: &Value) -> Option<String> {
-    let text = item
-        .get("content")?
-        .as_array()?
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<String>();
-    Some(text)
+fn response_text_key(value: &Value) -> (u64, u64) {
+    (
+        value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        value
+            .get("content_index")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    )
+}
+
+fn response_item_texts(item: &Value) -> Vec<(u64, &str)> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, part)| part["type"] == "output_text")
+        .filter_map(|(index, part)| part["text"].as_str().map(|text| (index as u64, text)))
+        .collect()
 }
 
 fn reconcile_response_text(
     open: &mut bool,
-    streamed: &mut String,
+    active: &mut Option<(u64, u64)>,
+    texts: &mut std::collections::BTreeMap<(u64, u64), String>,
+    key: (u64, u64),
     final_text: &str,
-) -> Vec<ModelEvent> {
+) -> Result<Vec<ModelEvent>> {
+    let streamed = texts.entry(key).or_default();
     let mut events = Vec::new();
-    if final_text.starts_with(streamed.as_str()) && final_text.len() > streamed.len() {
-        if !*open {
-            *open = true;
-            events.push(ModelEvent::TextStart);
-        }
-        let suffix = &final_text[streamed.len()..];
-        streamed.push_str(suffix);
-        events.push(ModelEvent::TextDelta(suffix.into()));
+    if final_text == streamed {
+        return Ok(events);
     }
-    events
+    if !final_text.starts_with(streamed.as_str()) {
+        return Err(Error::Provider(
+            "OpenAI Responses final text does not match streamed text".into(),
+        ));
+    }
+    if *open && *active != Some(key) {
+        *open = false;
+        events.push(ModelEvent::TextEnd);
+    }
+    if !*open {
+        *open = true;
+        *active = Some(key);
+        events.push(ModelEvent::TextStart);
+    }
+    let suffix = &final_text[streamed.len()..];
+    streamed.push_str(suffix);
+    events.push(ModelEvent::TextDelta(suffix.into()));
+    Ok(events)
 }
 
 fn update_response_tool(
@@ -406,39 +442,71 @@ fn responses_input(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                 text,
                 replay_state,
                 calls,
+                parts,
                 ..
             } => {
+                if !parts.is_empty() {
+                    for part in parts {
+                        match part {
+                            AssistantPart::Text(text) => {
+                                push_responses_text(&mut input, &message.role, text)
+                            }
+                            AssistantPart::Reasoning {
+                                replay_state: Some(state),
+                                ..
+                            } if state.provider_kind == "openai_responses" => {
+                                push_response_reasoning(&mut input, state)?;
+                            }
+                            AssistantPart::ToolCall(index) => {
+                                let call = calls.get(*index).ok_or_else(|| {
+                                    Error::Protocol("invalid ordered tool index".into())
+                                })?;
+                                input.push(response_tool_call(call)?);
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 if let Some(state) = replay_state
                     .as_ref()
                     .filter(|state| state.provider_kind == "openai_responses")
                 {
-                    let items = state
-                        .value
-                        .get("items")
-                        .and_then(Value::as_array)
-                        .ok_or_else(|| {
-                            Error::Protocol("OpenAI Responses replay state is missing items".into())
-                        })?;
-                    input.extend(
-                        items
-                            .iter()
-                            .map(response_reasoning_input)
-                            .collect::<Result<Vec<_>>>()?,
-                    );
+                    push_response_reasoning(&mut input, state)?;
                 }
                 push_responses_text(&mut input, &message.role, text);
                 for call in calls {
-                    input.push(json!({
-                        "type": "function_call",
-                        "call_id": call.call_id,
-                        "name": call.name,
-                        "arguments": serde_json::to_string(&call.arguments)?,
-                    }));
+                    input.push(response_tool_call(call)?);
                 }
             }
         }
     }
     Ok(input)
+}
+
+fn response_tool_call(call: &crate::model::ToolCallContent) -> Result<Value> {
+    Ok(
+        json!({"type":"function_call", "call_id":call.call_id, "name":call.name,
+        "arguments":serde_json::to_string(&call.arguments)?}),
+    )
+}
+
+fn push_response_reasoning(
+    input: &mut Vec<Value>,
+    state: &crate::model::ProviderReplayState,
+) -> Result<()> {
+    let items = state
+        .value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::Protocol("OpenAI Responses replay state is missing items".into()))?;
+    input.extend(
+        items
+            .iter()
+            .map(response_reasoning_input)
+            .collect::<Result<Vec<_>>>()?,
+    );
+    Ok(())
 }
 
 fn response_reasoning_input(item: &Value) -> Result<Value> {
@@ -550,6 +618,7 @@ mod tests {
             message_id: "assistant-1".into(),
             role: Role::Assistant,
             content: ProjectedContent::Assistant {
+                parts: Vec::new(),
                 text: String::new(),
                 thinking: String::new(),
                 replay_state: Some(ProviderReplayState {

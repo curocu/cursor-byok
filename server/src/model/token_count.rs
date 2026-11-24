@@ -30,6 +30,7 @@ fn estimate_message_tokens(message: &ProjectedMessage) -> u64 {
             thinking,
             replay_state: _,
             calls,
+            ..
         } => {
             let calls = calls.iter().fold(0_u64, |total, call| {
                 total
@@ -168,6 +169,7 @@ mod tests {
             message_id: "assistant".into(),
             role: Role::Assistant,
             content: ProjectedContent::Assistant {
+                parts: Vec::new(),
                 text: String::new(),
                 thinking: "reasoning".into(),
                 replay_state: None,
@@ -222,6 +224,7 @@ mod tests {
             message_id: "assistant".into(),
             role: Role::Assistant,
             content: ProjectedContent::Assistant {
+                parts: Vec::new(),
                 text: "answer".into(),
                 thinking: "reasoning".repeat(1_000),
                 replay_state,

@@ -31975,6 +31975,8 @@ message RunFullSelfDrivingWorkflowSuggestionResponse {
 message RunGenerateImageError {
   string error = 1;
   bool model_restricted = 2;
+  optional int32 provider_status_code = 3;
+  bool content_safety_blocked = 4;
 }
 
 // Copied from: local:aiserver.v1.RunGenerateImageRequest (var: TOl)
@@ -31983,6 +31985,7 @@ message RunGenerateImageRequest {
   repeated GenerateImageReferenceImage reference_images = 2;
   string model_id = 3;
   bool max_mode = 4;
+  optional string aspect_ratio = 5;
 }
 
 // Copied from: local:aiserver.v1.RunGenerateImageResponse (var: DOl)

@@ -15,7 +15,7 @@ use axum::{
 };
 use tauri::{
     async_runtime::JoinHandle, webview::Color, AppHandle, Manager, RunEvent, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
@@ -142,14 +142,16 @@ fn create_main_window(
     builder.build()
 }
 
-/// 按需打开主窗口:webview 仅在需要界面时创建,关闭窗口即销毁释放内存。
+/// 复用已隐藏或最小化的主窗口;仅首次打开时创建 webview。
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        tracing::info!("restoring existing main window");
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(());
     }
+    tracing::info!("creating main window");
     let address = app.state::<DesktopRuntime>().server_addr;
     let window = create_main_window(app, address)?;
     window.show()?;
@@ -214,7 +216,6 @@ pub fn run() -> ExitCode {
             ))?;
             let config = {
                 let mut config = Config::desktop()?;
-                // 插件的 minAppVersion 按桌面应用版本判定,而不是内嵌 server 库的版本。
                 config.app_version = env!("CARGO_PKG_VERSION").into();
                 config
             };
@@ -276,14 +277,41 @@ pub fn run() -> ExitCode {
         }
     };
 
-    app.run(|app, event| match event {
-        // code 为 None 表示所有窗口已被关闭(轻量模式),阻止退出,
-        // 转发服务继续在托盘后台运行;code 为 Some 时是显式退出请求。
+    app.run(handle_run_event);
+
+    ExitCode::SUCCESS
+}
+
+fn handle_run_event(app: &AppHandle, event: RunEvent) {
+    match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == MAIN_WINDOW_LABEL => {
+            if !app
+                .state::<DesktopRuntime>()
+                .exiting
+                .load(Ordering::Acquire)
+            {
+                api.prevent_close();
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    match window.hide() {
+                        Ok(()) => {
+                            tracing::info!("main window hidden to tray; server continues running")
+                        }
+                        Err(error) => tracing::error!(%error, "failed to hide main window"),
+                    }
+                }
+            }
+        }
+        // 无窗口(例如静默启动)不代表退出;仅显式退出时停止后台服务。
         RunEvent::ExitRequested { code, api, .. } => match code {
             None => api.prevent_exit(),
             Some(_) => {
                 let runtime = app.state::<DesktopRuntime>();
                 if !runtime.exiting.swap(true, Ordering::AcqRel) {
+                    tracing::info!("explicit desktop exit requested; stopping server");
                     api.prevent_exit();
                     runtime.shutdown.cancel();
                     let server = runtime.server.lock().expect("server lock poisoned").take();
@@ -314,7 +342,85 @@ pub fn run() -> ExitCode {
             let _ = open_main_window(app);
         }
         _ => {}
-    });
+    }
+}
 
-    ExitCode::SUCCESS
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    fn wait_for(mut condition: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native window state timed out"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    #[ignore = "creates a real Windows WebView; run explicitly in an interactive desktop session"]
+    fn native_minimize_close_restore_and_explicit_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_directory = directory.path().to_owned();
+        let mut context = tauri::generate_context!();
+        context.config_mut().identifier = "dev.cursorbyok.window-lifecycle-test".into();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let shutdown = CancellationToken::new();
+        let observed_shutdown = shutdown.clone();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .setup(move |app| {
+                app.manage(DesktopRuntime {
+                    shutdown,
+                    server: Mutex::new(None),
+                    exiting: AtomicBool::new(false),
+                    server_addr: "127.0.0.1:9".parse().unwrap(),
+                });
+                WebviewWindowBuilder::new(
+                    app,
+                    MAIN_WINDOW_LABEL,
+                    WebviewUrl::External("about:blank".parse().unwrap()),
+                )
+                .title("Cursor BYOK isolated lifecycle test")
+                .data_directory(data_directory)
+                .build()?;
+                let app = app.handle().clone();
+                std::thread::spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let window = app.get_webview_window(MAIN_WINDOW_LABEL).unwrap();
+                        window.minimize().unwrap();
+                        wait_for(|| window.is_minimized().unwrap());
+                        open_main_window(&app).unwrap();
+                        wait_for(|| {
+                            !window.is_minimized().unwrap() && window.is_visible().unwrap()
+                        });
+                        window.set_title("lifecycle marker").unwrap();
+                        window.close().unwrap();
+                        wait_for(|| !window.is_visible().unwrap());
+                        let retained = app
+                            .get_webview_window(MAIN_WINDOW_LABEL)
+                            .expect("close must not destroy WebView");
+                        assert_eq!(retained.title().unwrap(), "lifecycle marker");
+                        assert!(!app.state::<DesktopRuntime>().shutdown.is_cancelled());
+                        open_main_window(&app).unwrap();
+                        wait_for(|| window.is_visible().unwrap());
+                        assert_eq!(window.title().unwrap(), "lifecycle marker");
+                    }));
+                    result_tx.send(result.is_ok()).unwrap();
+                    app.exit(0);
+                });
+                Ok(())
+            })
+            .build(context)
+            .unwrap();
+        app.run_return(handle_run_event);
+        assert!(result_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(
+            observed_shutdown.is_cancelled(),
+            "explicit exit must stop the server"
+        );
+    }
 }

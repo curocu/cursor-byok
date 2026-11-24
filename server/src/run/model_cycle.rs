@@ -245,6 +245,7 @@ pub async fn consume_model_cycle(
                 Some(_) => Err("provider emitted duplicate ToolCallEnd"),
                 None => Err("provider ended an unknown tool index"),
             },
+            ModelEvent::ReasoningReplayState(_) => Ok(()),
             ModelEvent::ProviderReplayState(state) => {
                 if replay_state.replace(state).is_some() {
                     Err("provider emitted duplicate ProviderReplayState")

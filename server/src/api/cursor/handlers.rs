@@ -21,7 +21,7 @@ use crate::{
         },
         services::{
             account, analytics, commit_message, compatibility, entitlement::FreeEntitlementCache,
-            inference_telemetry, knowledge, model_catalog, server_config, tab,
+            image_generation, inference_telemetry, knowledge, model_catalog, server_config, tab,
         },
         transport::{TransportParent, TransportRegistry},
     },
@@ -101,6 +101,7 @@ fn router_with_proxy(
             "/aiserver.v1.AiService/WriteGitCommitMessage",
             post(commit_message::write_git_commit_message),
         )
+        .route("/aiserver.v1.AiService/RunGenerateImage", post(image_generation::run))
         .route(
             "/aiserver.v1.NetworkService/IsConnected",
             post(is_connected),
@@ -247,7 +248,7 @@ async fn bidi_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    if let Some(local) = inference.append(&request).await? {
+    if let Some(local) = inference.append(&request, &parts.headers).await? {
         if !local {
             return proxy::forward(
                 Extension(proxy),
@@ -266,10 +267,7 @@ async fn bidi_handler(
     let trace_metadata = decoded.trace_metadata();
     let trace = registry.trace(&decoded.request_id);
     let local = if let Some(model_id) = decoded.model_id() {
-        // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
-        if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
-            || registry.store().model(model_id).await?.is_some()
-        {
+        if registry.store().model(model_id).await?.is_some() {
             tracing::info!(
                 request_id = decoded.request_id,
                 model_id,

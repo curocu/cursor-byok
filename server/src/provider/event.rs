@@ -31,6 +31,8 @@ pub enum ModelEvent {
     ToolCallEnd {
         index: usize,
     },
+    /// A completed reasoning block, before subsequent assistant blocks arrive.
+    ReasoningReplayState(ProviderReplayState),
     ProviderReplayState(ProviderReplayState),
     Usage(Usage),
     Done(FinishReason),

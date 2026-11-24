@@ -160,25 +160,24 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
         .map(|id| id.request_id.as_str())
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::Protocol("BidiAppend request_id is required".into()))?;
-    if !request.data_binary.is_empty() {
-        return Err(Error::Protocol(
-            "BidiAppend data_binary is not part of the captured protocol".into(),
-        ));
-    }
-    if request.data.is_empty() {
-        return Err(Error::Protocol(
-            "BidiAppend contains no AgentClientMessage".into(),
-        ));
-    }
-    let payload = hex::decode(&request.data)
-        .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
+    let payload = if !request.data_binary.is_empty() {
+        request.data_binary.clone()
+    } else {
+        if request.data.is_empty() {
+            return Err(Error::Protocol(
+                "BidiAppend contains no AgentClientMessage".into(),
+            ));
+        }
+        hex::decode(&request.data)
+            .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?
+    };
     // TEMP DEBUG: dump payload when decode fails so we can compare bytes against schema.
     let decoded = agent::AgentClientMessage::decode(payload.as_slice());
     if let Err(error) = &decoded {
         if let Ok(dir) = std::env::var("CURSOR_BYOK_DUMP_DIR") {
             let _ = std::fs::create_dir_all(&dir);
             let name = format!("{dir}\\{}-seq{}-{}bytes.hex", request_id, request.append_seqno, payload.len());
-            let _ = std::fs::write(&name, &request.data);
+            let _ = std::fs::write(&name, hex::encode(&payload));
             tracing::warn!(%error, path = %name, seqno = request.append_seqno, "dumped failing payload");
         }
     }

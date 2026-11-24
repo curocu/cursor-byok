@@ -1,11 +1,14 @@
+use std::collections::HashSet;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
 use crate::{
     cursor::protocol::proto::{agent::v1 as agent, inference as pb},
     model::{
-        ContentPart, ModelInvocation, ModelRequest, ModelSpec, ProjectedContent, ProjectedMessage,
-        PromptSpec, ProviderReplayState, Role, ToolCallContent, ToolDefinition, ToolResultContent,
+        AssistantPart, ContentPart, ModelInvocation, ModelRequest, ModelSpec, ProjectedContent,
+        ProjectedMessage, PromptSpec, ProviderReplayState, Role, ToolCallContent, ToolDefinition,
+        ToolResultContent,
     },
     Error, Result,
 };
@@ -115,8 +118,22 @@ pub fn invocation(
     use pb::inference_core_message::Content;
     let mut instructions = Vec::new();
     let mut history = Vec::new();
+    // A stopped argument stream may have no result yet. Never discard a call
+    // that Cursor reports as successfully executed, even if its JSON is damaged.
+    let successful_calls: HashSet<&str> = request
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            Some(Content::ToolContent(content)) => Some(&content.parts),
+            _ => None,
+        })
+        .flatten()
+        .filter(|result| !result.is_error && !result.cursor_tool_call_is_error.unwrap_or(false))
+        .map(|result| result.tool_call_id.as_str())
+        .collect();
+    let mut interrupted_calls = HashSet::new();
     for (i, message) in request.messages.iter().enumerate() {
-        let text = match message.content.as_ref() {
+        let mut text = match message.content.as_ref() {
             Some(Content::Text(text)) => text.clone(),
             Some(Content::Parts(content)) => content
                 .parts
@@ -140,6 +157,25 @@ pub fn invocation(
                     .as_ref()
                     .map(json_value)
                     .unwrap_or(Value::Null);
+                if interrupted_calls.contains(result.tool_call_id.as_str()) {
+                    let mut content = vec![ContentPart::Text {
+                        text: format!(
+                            "Historical interrupted tool call result ({}): {}",
+                            result.tool_name,
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string())
+                        ),
+                    }];
+                    content.extend(parts(&result.experimental_content)?);
+                    history.push(ProjectedMessage {
+                        message_id: format!("{i}:{j}"),
+                        role: Role::User,
+                        content: ProjectedContent::Parts(content),
+                    });
+                    continue;
+                }
                 history.push(ProjectedMessage {
                     message_id: format!("{i}:{j}"),
                     role: Role::Tool,
@@ -159,8 +195,46 @@ pub fn invocation(
             }
             continue;
         }
+        let original_text = text.clone();
         let content = if message.role == 2 {
-            let replay_state = message
+            let mut calls = Vec::new();
+            for (index, call) in message.tool_calls.iter().enumerate() {
+                let arguments = if let Some(raw) = &call.raw_tool_call_args {
+                    match serde_json::from_str(raw) {
+                        Ok(arguments) => arguments,
+                        Err(error)
+                            if error.is_eof()
+                                && !call.tool_call_id.is_empty()
+                                && !successful_calls.contains(call.tool_call_id.as_str()) =>
+                        {
+                            interrupted_calls.insert(call.tool_call_id.as_str());
+                            text.push_str(&format!(
+                                "\n[Historical {} call was interrupted before its JSON arguments were complete. It was not executed; do not restart it without a new request.]",
+                                call.tool_name
+                            ));
+                            tracing::warn!(
+                                tool_call_id = %call.tool_call_id,
+                                tool_name = %call.tool_name,
+                                "omitting interrupted tool arguments from inference history"
+                            );
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    call.args
+                        .as_ref()
+                        .map(json_struct)
+                        .unwrap_or_else(|| json!({}))
+                };
+                calls.push(ToolCallContent {
+                    index,
+                    call_id: call.tool_call_id.clone(),
+                    name: call.tool_name.clone(),
+                    arguments,
+                });
+            }
+            let mut replay_state = message
                 .anthropic_native_content
                 .as_deref()
                 .map(serde_json::from_str::<Value>)
@@ -178,7 +252,25 @@ pub fn invocation(
                         .and_then(|s| s.strip_prefix(REPLAY_PREFIX))
                         .and_then(|s| serde_json::from_str(s).ok())
                 }));
+            if let Some(blocks) = replay_state
+                .as_mut()
+                .filter(|state| state.provider_kind == "anthropic")
+                .and_then(|state| state.value.get_mut("blocks"))
+                .and_then(Value::as_array_mut)
+            {
+                blocks.retain(|block| {
+                    !(block["type"] == "tool_use"
+                        && block["id"]
+                            .as_str()
+                            .is_some_and(|id| interrupted_calls.contains(id)))
+                });
+            }
+            let mut ordered = assistant_parts(message, &calls, &original_text, model_id);
+            if !ordered.is_empty() && text.len() > original_text.len() {
+                ordered.push(AssistantPart::Text(text[original_text.len()..].into()));
+            }
             ProjectedContent::Assistant {
+                parts: ordered,
                 text,
                 thinking: message
                     .reasoning_parts
@@ -187,27 +279,7 @@ pub fn invocation(
                     .collect::<Vec<_>>()
                     .join(""),
                 replay_state,
-                calls: message
-                    .tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| {
-                        let arguments = if let Some(raw) = &call.raw_tool_call_args {
-                            serde_json::from_str(raw)?
-                        } else {
-                            call.args
-                                .as_ref()
-                                .map(json_struct)
-                                .unwrap_or_else(|| json!({}))
-                        };
-                        Ok(ToolCallContent {
-                            index,
-                            call_id: call.tool_call_id.clone(),
-                            name: call.tool_name.clone(),
-                            arguments,
-                        })
-                    })
-                    .collect::<Result<_>>()?,
+                calls,
             }
         } else {
             ProjectedContent::Parts(match message.content.as_ref() {
@@ -292,6 +364,69 @@ pub fn invocation(
     })
 }
 
+// Match the harness validation: inconsistent ordering metadata uses the flat form.
+fn assistant_parts(
+    message: &pb::InferenceCoreMessage,
+    calls: &[ToolCallContent],
+    text: &str,
+    model_id: &str,
+) -> Vec<AssistantPart> {
+    if message.assistant_part_order.is_empty() {
+        return Vec::new();
+    }
+    let texts = if message.assistant_text_parts.is_empty() && !text.is_empty() {
+        vec![text.to_owned()]
+    } else {
+        message.assistant_text_parts.clone()
+    };
+    let count = |kind| {
+        message
+            .assistant_part_order
+            .iter()
+            .filter(|&&v| v == kind)
+            .count()
+    };
+    if count(1) != message.reasoning_parts.len()
+        || count(2) != texts.len()
+        || count(3) != message.tool_calls.len()
+        || count(1) + count(2) + count(3) != message.assistant_part_order.len()
+        || texts.concat() != text
+    {
+        return Vec::new();
+    }
+    let (mut reasoning, mut text_index, mut tool) = (0, 0, 0);
+    let mut parts = Vec::new();
+    for kind in &message.assistant_part_order {
+        match kind {
+            1 => {
+                let part = &message.reasoning_parts[reasoning];
+                reasoning += 1;
+                parts.push(AssistantPart::Reasoning {
+                    text: part.text.clone(),
+                    replay_state: part
+                        .signature
+                        .as_deref()
+                        .filter(|_| part.model_name.as_deref() == Some(model_id))
+                        .and_then(|s| s.strip_prefix(REPLAY_PREFIX))
+                        .and_then(|s| serde_json::from_str(s).ok()),
+                });
+            }
+            2 => {
+                parts.push(AssistantPart::Text(texts[text_index].clone()));
+                text_index += 1;
+            }
+            _ => {
+                let call = &message.tool_calls[tool];
+                tool += 1;
+                if let Some(index) = calls.iter().position(|c| c.call_id == call.tool_call_id) {
+                    parts.push(AssistantPart::ToolCall(index));
+                }
+            }
+        }
+    }
+    parts
+}
+
 // Cursor serializes the AI SDK schema object inside the protobuf Struct.
 fn tool_schema(parameters: &prost_types::Struct) -> Value {
     let mut value = json_struct(parameters);
@@ -304,6 +439,226 @@ fn tool_schema(parameters: &prost_types::Struct) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interrupted_task_request() -> pb::InferenceStreamRequest {
+        use pb::inference_core_message::Content;
+        pb::InferenceStreamRequest {
+            messages: vec![
+                pb::InferenceCoreMessage {
+                    role: 2,
+                    content: Some(Content::Text("I will check the existing files.".into())),
+                    tool_calls: vec![
+                        pb::InferenceToolCall {
+                            tool_call_id: "read-completed".into(),
+                            tool_name: "Read".into(),
+                            raw_tool_call_args: Some(r#"{"path":"a.txt"}"#.into()),
+                            ..Default::default()
+                        },
+                        pb::InferenceToolCall {
+                            tool_call_id: "task-interrupted".into(),
+                            tool_name: "Task".into(),
+                            raw_tool_call_args: Some(
+                                r#"{"description":"研究分炉规则","prompt":"半截参数"#.into(),
+                            ),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                pb::InferenceCoreMessage {
+                    role: 3,
+                    content: Some(Content::ToolContent(pb::InferenceToolResultContent {
+                        parts: vec![
+                            pb::InferenceToolResultPart {
+                                tool_call_id: "read-completed".into(),
+                                tool_name: "Read".into(),
+                                result: Some(prost_types::Value {
+                                    kind: Some(prost_types::value::Kind::StringValue(
+                                        "file contents".into(),
+                                    )),
+                                }),
+                                ..Default::default()
+                            },
+                            pb::InferenceToolResultPart {
+                                tool_call_id: "task-interrupted".into(),
+                                tool_name: "Task".into(),
+                                result: Some(prost_types::Value {
+                                    kind: Some(prost_types::value::Kind::StringValue(
+                                        "Tool call arguments were not valid JSON".into(),
+                                    )),
+                                }),
+                                is_error: true,
+                                ..Default::default()
+                            },
+                        ],
+                    })),
+                    ..Default::default()
+                },
+                pb::InferenceCoreMessage {
+                    role: 1,
+                    content: Some(Content::Text(
+                        "已经停止，可以先执行两个。不要重新启动旧 Task。".into(),
+                    )),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn invalid_order_metadata_uses_flat_history() {
+        let mut request = interrupted_task_request();
+        for (order, texts) in [
+            (vec![2, 3], vec!["I will check the existing files.".into()]),
+            (
+                vec![2, 3, 3, 7],
+                vec!["I will check the existing files.".into()],
+            ),
+            (vec![2, 3, 3], vec!["mismatched text".into()]),
+        ] {
+            request.messages[0].assistant_part_order = order;
+            request.messages[0].assistant_text_parts = texts;
+            let input = invocation(&request, "model", "conversation", "run", "resume", 0).unwrap();
+            assert!(matches!(&input.request.history[0].content,
+                ProjectedContent::Assistant { parts, calls, text, .. } if parts.is_empty() && calls.len() == 1 && text.contains("interrupted")));
+        }
+    }
+
+    #[test]
+    fn ordered_history_skips_interrupted_tool_and_retains_followup_note() {
+        let mut request = interrupted_task_request();
+        request.messages[0].assistant_part_order = vec![2, 3, 3];
+        let input = invocation(&request, "model", "conversation", "run", "resume", 0).unwrap();
+        let ProjectedContent::Assistant { parts, .. } = &input.request.history[0].content else {
+            panic!()
+        };
+        assert_eq!(parts.len(), 3);
+        assert!(
+            matches!(&parts[0], AssistantPart::Text(t) if t == "I will check the existing files.")
+        );
+        assert!(matches!(&parts[1], AssistantPart::ToolCall(0)));
+        assert!(matches!(&parts[2], AssistantPart::Text(t) if t.contains("interrupted")));
+    }
+
+    #[test]
+    fn ordered_reasoning_replay_is_isolated_by_model() {
+        let mut request = pb::InferenceStreamRequest::default();
+        request.messages.push(pb::InferenceCoreMessage {
+            role: 2,
+            assistant_part_order: vec![1],
+            reasoning_parts: vec![pb::InferenceReasoningPart {
+                text: "why".into(),
+                model_name: Some("model".into()),
+                signature: Some(format!(
+                    "{REPLAY_PREFIX}{}",
+                    json!({"provider_kind":"openai_responses", "value":{"items":[]}})
+                )),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        for (model, expected) in [("model", true), ("other-model", false)] {
+            let input = invocation(&request, model, "conversation", "run", "resume", 0).unwrap();
+            let ProjectedContent::Assistant {
+                parts,
+                replay_state,
+                ..
+            } = &input.request.history[0].content
+            else {
+                panic!()
+            };
+            assert_eq!(replay_state.is_some(), expected);
+            assert!(
+                matches!(&parts[0], AssistantPart::Reasoning { text, replay_state } if text == "why" && replay_state.is_some() == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_task_history_preserves_completed_tools_and_followup() {
+        use pb::inference_core_message::Content;
+        for (is_error, cursor_error) in [(true, None), (false, Some(true))] {
+            let mut request = interrupted_task_request();
+            let Some(Content::ToolContent(results)) = &mut request.messages[1].content else {
+                unreachable!()
+            };
+            results.parts[1].is_error = is_error;
+            results.parts[1].cursor_tool_call_is_error = cursor_error;
+            let input = invocation(&request, "model", "conversation", "run", "resume", 0).unwrap();
+            let history = &input.request.history;
+            let ProjectedContent::Assistant { text, calls, .. } = &history[0].content else {
+                panic!("expected assistant history");
+            };
+            assert!(text.starts_with("I will check the existing files."));
+            assert!(text.contains("Task") && text.contains("interrupted"));
+            assert!(!text.contains("半截参数"));
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].call_id, "read-completed");
+            assert_eq!(calls[0].arguments, json!({"path":"a.txt"}));
+            assert!(
+                matches!(&history[1].content, ProjectedContent::ToolResult(r)
+                if r.call_id == "read-completed" && r.content == "file contents")
+            );
+            assert!(matches!(&history[2].content, ProjectedContent::Parts(parts)
+                if matches!(&parts[0], ContentPart::Text { text } if text.contains("Tool call arguments were not valid JSON"))));
+            assert_eq!(history[2].role, Role::User);
+            assert!(matches!(&history[3].content, ProjectedContent::Parts(parts)
+                if matches!(&parts[0], ContentPart::Text { text } if text.contains("可以先执行两个"))));
+        }
+    }
+
+    #[test]
+    fn interrupted_task_without_result_does_not_block_followup() {
+        use pb::inference_core_message::Content;
+        let mut request = interrupted_task_request();
+        let Some(Content::ToolContent(results)) = &mut request.messages[1].content else {
+            unreachable!()
+        };
+        results.parts.pop();
+        assert!(invocation(&request, "model", "conversation", "run", "resume", 0).is_ok());
+    }
+
+    #[test]
+    fn successful_or_non_truncated_invalid_calls_are_not_silently_removed() {
+        use pb::inference_core_message::Content;
+        let mut request = interrupted_task_request();
+        let Some(Content::ToolContent(results)) = &mut request.messages[1].content else {
+            unreachable!()
+        };
+        results.parts[1].is_error = false;
+        assert!(invocation(&request, "model", "conversation", "run", "resume", 0).is_err());
+
+        let mut request = interrupted_task_request();
+        request.messages[0].tool_calls[1].raw_tool_call_args = Some("{invalid-json}".into());
+        assert!(invocation(&request, "model", "conversation", "run", "resume", 0).is_err());
+
+        let mut request = interrupted_task_request();
+        request.messages[0].tool_calls[1].tool_call_id.clear();
+        assert!(invocation(&request, "model", "conversation", "run", "resume", 0).is_err());
+    }
+
+    #[test]
+    fn interrupted_task_preserves_signed_thinking_without_replaying_native_tool_use() {
+        let mut request = interrupted_task_request();
+        let thinking = json!({"type":"thinking", "thinking":"Reasoning", "signature":"signed"});
+        request.messages[0].anthropic_native_content = Some(
+            json!([
+                thinking.clone(),
+                {"type":"tool_use", "id":"task-interrupted", "name":"Task", "input":{}}
+            ])
+            .to_string(),
+        );
+        let input = invocation(&request, "model", "conversation", "run", "resume", 0).unwrap();
+        let ProjectedContent::Assistant {
+            replay_state: Some(state),
+            ..
+        } = &input.request.history[0].content
+        else {
+            panic!("expected native replay state");
+        };
+        assert_eq!(state.value["blocks"], json!([thinking]));
+    }
 
     #[test]
     fn unwraps_cursor_ai_sdk_tool_schema_before_sending_to_provider() {

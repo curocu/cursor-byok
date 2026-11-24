@@ -1,4 +1,4 @@
-//! Routes model requests to built-in configurations or stable plugin model IDs.
+//! Routes model requests to configured providers.
 use std::{sync::Arc, time::Duration};
 
 use async_stream::try_stream;
@@ -8,19 +8,17 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{ProviderConfig, ProviderKind},
     model::{ModelInvocation, ModelLatency, NewLlmCall, ProviderType},
-    plugin::{PluginRegistry, ADAPTER_ID_PREFIX},
     store::Store,
     Error, Result,
 };
 
 use super::{
-    normalize::NormalizedProvider, recorder::CancelOnDrop, AnthropicProvider, CallRecorder,
-    OpenAiChatProvider, OpenAiResponsesProvider, Provider, ProviderStream,
+    normalize::NormalizedProvider, AnthropicProvider, CallRecorder, OpenAiChatProvider,
+    OpenAiResponsesProvider, Provider, ProviderStream,
 };
 
 pub struct ProviderRouter {
     store: Store,
-    plugins: PluginRegistry,
     clients: crate::network::NetworkClients,
     request_timeout: Duration,
     stream_idle_timeout: Duration,
@@ -29,14 +27,12 @@ pub struct ProviderRouter {
 impl ProviderRouter {
     pub fn new(
         store: Store,
-        plugins: PluginRegistry,
         clients: crate::network::NetworkClients,
         request_timeout: Duration,
         stream_idle_timeout: Duration,
     ) -> Self {
         Self {
             store,
-            plugins,
             clients,
             request_timeout,
             stream_idle_timeout,
@@ -51,70 +47,77 @@ impl Provider for ProviderRouter {
         cancellation: CancellationToken,
     ) -> ProviderStream {
         let store = self.store.clone();
-        let plugins = self.plugins.clone();
         let clients = self.clients.clone();
         let request_timeout = self.request_timeout;
         let stream_idle_timeout = self.stream_idle_timeout;
         Box::pin(try_stream! {
             let selected = invocation.request.model.model_id.clone();
-            // 两条分支只负责装配 Recorder 与 Provider 流;
-            // 事件消费(空闲超时看门狗、记录、错误规范化)对两者完全一致。
-            let (recorder, _cancel_on_drop, mut stream): (CallRecorder, CancelOnDrop, ProviderStream) =
-                if selected.starts_with(ADAPTER_ID_PREFIX) {
-                    // 插件模型与内置模型走完全相同的流程:资源选择与将来的
-                    // 负载均衡都在插件 Provider 内部。
-                    let plan = plugins.plan_model(&selected).await?;
-                    let recorder = start_recorder(&store, &invocation, &selected, &plan.model.display_name, ProviderType::Plugin, &plan.request_url, &plan.model.model_id).await?;
-                    let guard = recorder.cancel_on_drop();
-                    let mut routed = invocation.clone();
-                    routed.request.model.display_name = Some(plan.model.display_name.clone());
-                    if let Some(tokens) = plan.model.max_output_tokens {
-                        routed.request.model.max_output_tokens.get_or_insert(tokens);
-                    }
-                    let provider: Arc<dyn Provider> = Arc::new(NormalizedProvider::new(Arc::new(PluginModelProvider {
-                        registry: plugins.clone(),
-                        recorder: recorder.clone(),
-                    })));
-                    (recorder, guard, provider.stream(routed, cancellation.clone()))
-                } else {
-                    let mut routed = invocation.clone();
-                    let model = store.model(&selected).await?.ok_or_else(|| Error::Provider(format!("unknown model: {selected}")))?;
-                    let provider_type = model.provider_type();
-                    let request_url = model.request_url()?;
-                    model.configure(&mut routed.request.model);
-                    let configured_params = super::request_template::render_json_strings(
-                        model.extra_params(),
-                        &invocation.conversation_id,
-                    );
-                    if let (Some(params), Some(configured)) = (
-                        routed.request.model.extra_params.as_object_mut(),
-                        configured_params.as_object(),
-                    ) {
-                        params.extend(configured.clone());
-                    }
-                    routed.request.model.model_id = model.model_id.clone();
-                    let recorder = start_recorder(&store, &invocation, &model.model_hash, &model.display_name, provider_type, &request_url, &model.model_id).await?;
-                    let guard = recorder.cancel_on_drop();
-                    let config = ProviderConfig {
-                        kind: provider_kind(provider_type),
-                        request_url,
-                        api_key: model.api_key.clone(),
-                        custom_headers: if model.custom_headers_enabled {
-                            custom_headers(
-                                &model.custom_headers,
-                                &invocation.conversation_id,
-                            )?
-                        } else {
-                            reqwest::header::HeaderMap::new()
-                        },
-                        max_output_tokens: model.max_output_tokens(),
-                        request_timeout,
-                        allowed_body_fields: None,
-                    };
-                    let client = clients.provider_client(request_timeout).await?;
-                    let provider = build_observed(&config, recorder.clone(), client)?;
-                    (recorder, guard, provider.stream(routed, cancellation.clone()))
+            let mut routed = invocation.clone();
+            let model = store.model(&selected).await?.ok_or_else(|| Error::Provider(format!("unknown model: {selected}")))?;
+            if model.is_image_generation() {
+                Err(Error::Config("image generation models cannot be used for chat or subagents".into()))?;
+            }
+            let provider_type = model.provider_type();
+            let request_url = model.request_url()?;
+            model.configure(&mut routed.request.model);
+            let mut configured_params = super::request_template::render_json_strings(
+                model.extra_params(),
+                &invocation.conversation_id,
+            );
+            // Cursor's selected effort takes precedence over saved extras.
+            // Omitted effort keeps the provider's configured behavior.
+            if let Some(effort) = &invocation.request.model.reasoning.effort {
+                let (key, nested) = match provider_type {
+                    ProviderType::OpenAiChat => ("reasoning_effort", false),
+                    ProviderType::OpenAiResponses => ("reasoning", true),
+                    ProviderType::Anthropic => ("output_config", true),
+                    ProviderType::Plugin | ProviderType::OpenAiImages => unreachable!("not a chat provider"),
                 };
+                if let Some(value) = configured_params.get_mut(key) {
+                    if nested {
+                        let object = value.as_object_mut().ok_or_else(|| Error::Config(format!("{key} extra params must be an object")))?;
+                        object.insert("effort".into(), serde_json::json!(effort));
+                    } else {
+                        *value = serde_json::json!(effort);
+                    }
+                }
+                if provider_type == ProviderType::Anthropic
+                    && configured_params.pointer("/thinking/type").and_then(serde_json::Value::as_str) == Some("disabled")
+                {
+                    configured_params["thinking"] = serde_json::json!({"type":"adaptive", "display":"summarized"});
+                }
+            }
+            if let (Some(params), Some(configured)) = (
+                routed.request.model.extra_params.as_object_mut(),
+                configured_params.as_object(),
+            ) {
+                for (key, value) in configured {
+                    params.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            routed.request.model.model_id = model.model_id.clone();
+            let recorder = start_recorder(&store, &routed, &model.model_hash, &model.display_name, provider_type, &request_url, &model.model_id).await?;
+            let guard = recorder.cancel_on_drop();
+            let config = ProviderConfig {
+                kind: provider_kind(provider_type),
+                request_url,
+                api_key: model.api_key.clone(),
+                custom_headers: if model.custom_headers_enabled {
+                    custom_headers(
+                        &model.custom_headers,
+                        &invocation.conversation_id,
+                    )?
+                } else {
+                    reqwest::header::HeaderMap::new()
+                },
+                max_output_tokens: model.max_output_tokens(),
+                request_timeout,
+                allowed_body_fields: None,
+            };
+            let client = clients.provider_client(request_timeout).await?;
+            let provider = build_observed(&config, recorder.clone(), client)?;
+            let _cancel_on_drop = guard;
+            let mut stream = provider.stream(routed, cancellation.clone());
 
             let stream_started = std::time::Instant::now();
             tracing::debug!(
@@ -162,7 +165,7 @@ impl Provider for ProviderRouter {
                         yield event;
                     }
                     Err(error) => {
-                        let error = normalize_provider_stream_error(error, request_timeout);
+                        let error = normalize_provider_stream_error(error, request_timeout, now.duration_since(stream_started));
                         tracing::debug!(
                             error = %error,
                             elapsed_ms,
@@ -192,6 +195,7 @@ fn event_name(event: &super::ModelEvent) -> &'static str {
         super::ModelEvent::ToolCallStart { .. } => "ToolCallStart",
         super::ModelEvent::ToolCallArgumentsDelta { .. } => "ToolCallArgsDelta",
         super::ModelEvent::ToolCallEnd { .. } => "ToolCallEnd",
+        super::ModelEvent::ReasoningReplayState(_) => "ReasoningReplayState",
         super::ModelEvent::ProviderReplayState(_) => "ReplayState",
         super::ModelEvent::Usage(_) => "Usage",
         super::ModelEvent::Done(_) => "Done",
@@ -244,30 +248,13 @@ async fn finish_stream(recorder: &CallRecorder, cancellation: &CancellationToken
     }
 }
 
-/// 插件模型的 Provider 实现;对路由与规范化层完全等同于内置 Provider。
-struct PluginModelProvider {
-    registry: PluginRegistry,
-    recorder: CallRecorder,
-}
-
-impl Provider for PluginModelProvider {
-    fn stream(
-        &self,
-        invocation: ModelInvocation,
-        cancellation: CancellationToken,
-    ) -> ProviderStream {
-        self.registry
-            .stream_model(invocation, cancellation, self.recorder.clone())
-    }
-}
-
 fn provider_kind(provider_type: ProviderType) -> ProviderKind {
     match provider_type {
         ProviderType::OpenAiChat => ProviderKind::OpenAiChat,
         ProviderType::OpenAiResponses => ProviderKind::OpenAiResponses,
         ProviderType::Anthropic => ProviderKind::Anthropic,
-        // 内置模型的 provider_type 只来自 ModelType,不可能是插件。
-        ProviderType::Plugin => unreachable!("plugin models never use built-in provider configs"),
+        // Plugin is retained only for reading historical call records.
+        ProviderType::Plugin | ProviderType::OpenAiImages => unreachable!("not a chat provider"),
     }
 }
 
@@ -286,21 +273,37 @@ fn stream_idle_timeout_error(idle_timeout: Duration) -> Error {
     ))
 }
 
-fn request_timeout_error(request_timeout: Duration) -> Error {
-    Error::Provider(format!(
-        "provider request timed out after {} seconds ({} minutes)",
-        request_timeout.as_secs(),
-        request_timeout.as_secs() / 60
-    ))
-}
-
-fn normalize_provider_stream_error(error: Error, request_timeout: Duration) -> Error {
+fn normalize_provider_stream_error(
+    error: Error,
+    request_timeout: Duration,
+    elapsed: Duration,
+) -> Error {
     match error {
-        Error::Http(source) if source.is_timeout() => request_timeout_error(request_timeout),
-        Error::Http(source) if source.is_body() => Error::Provider(format!(
-            "provider stream transport failed while reading the response body: {}",
-            root_error_message(&source)
-        )),
+        Error::Http(source) => {
+            let source = source.without_url();
+            if source.is_timeout() {
+                let phase = if source.is_connect() {
+                    "connection"
+                } else if source.is_body() || source.is_decode() {
+                    "response body read"
+                } else {
+                    "request"
+                };
+                Error::Provider(format!(
+                    "provider {phase} timed out after {} ms (request timeout limit: {} ms): {}",
+                    elapsed.as_millis(),
+                    request_timeout.as_millis(),
+                    root_error_message(&source)
+                ))
+            } else if source.is_body() || source.is_decode() {
+                Error::Provider(format!(
+                    "provider stream transport failed while reading the response body: {}",
+                    root_error_message(&source)
+                ))
+            } else {
+                Error::Http(source)
+            }
+        }
         error => error,
     }
 }
@@ -405,22 +408,175 @@ mod tests {
         assert!(result.is_err());
     }
 
+    async fn transport_server(
+        response: &'static [u8],
+        hold_open: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(response).await.unwrap();
+            if hold_open {
+                std::future::pending::<()>().await;
+            }
+        });
+        (format!("http://{address}/?key=synthetic-secret"), task)
+    }
+
+    #[tokio::test]
+    async fn connection_timeout_does_not_claim_the_total_request_limit_elapsed() {
+        let (url, server) = transport_server(b"", true).await;
+        let client = reqwest::Client::builder()
+            .use_native_tls()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = client
+            .get(url.replacen("http:", "https:", 1))
+            .send()
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        server.abort();
+        assert!(error.is_timeout() && error.is_connect());
+        let message =
+            normalize_provider_stream_error(Error::Http(error), Duration::from_secs(3600), elapsed)
+                .to_string();
+        assert!(message.contains("connection timed out"), "{message}");
+        assert!(
+            message.contains(&format!("after {} ms", elapsed.as_millis())),
+            "{message}"
+        );
+        assert!(!message.contains("timed out after 3600"), "{message}");
+        assert!(!message.contains("synthetic-secret"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn request_and_body_timeouts_report_the_actual_wait() {
+        for (response, limit, phase) in [
+            (b"".as_slice(), Duration::from_secs(3600), "request"),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".as_slice(),
+                Duration::from_secs(3600),
+                "response body read",
+            ),
+            (b"".as_slice(), Duration::from_millis(50), "request"),
+        ] {
+            let (url, server) = transport_server(response, true).await;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .read_timeout(if limit < Duration::from_secs(1) {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(50)
+                })
+                .timeout(limit)
+                .build()
+                .unwrap();
+            let started = std::time::Instant::now();
+            let error = match client.get(&url).send().await {
+                Ok(response) => response.bytes().await.unwrap_err(),
+                Err(error) => error,
+            };
+            let elapsed = started.elapsed();
+            server.abort();
+            assert!(error.is_timeout());
+            let message =
+                normalize_provider_stream_error(Error::Http(error), limit, elapsed).to_string();
+            assert!(!message.contains("timed out after 3600"), "{message}");
+            assert!(
+                message.contains(&format!(
+                    "provider {phase} timed out after {} ms",
+                    elapsed.as_millis()
+                )),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("request timeout limit: {} ms", limit.as_millis())),
+                "{message}"
+            );
+            assert!(!message.contains("synthetic-secret"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_and_invalid_compressed_bodies_keep_the_transport_cause() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 8\r\n\r\nnot-gzip"
+                .as_slice(),
+        ] {
+            let (url, server) = transport_server(response, false).await;
+            let error = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap_err();
+            server.await.unwrap();
+            assert!(error.is_body() || error.is_decode());
+            let cause = root_error_message(&error);
+            let message = normalize_provider_stream_error(
+                Error::Http(error),
+                Duration::from_secs(3600),
+                Duration::ZERO,
+            )
+            .to_string();
+            assert!(
+                message.contains("while reading the response body"),
+                "{message}"
+            );
+            assert!(message.contains(&cause), "{message}");
+            assert!(!message.contains("synthetic-secret"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_http_errors_do_not_expose_the_request_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/?key=synthetic-secret"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect() && !error.is_timeout());
+        let error = normalize_provider_stream_error(
+            Error::Http(error),
+            Duration::from_secs(3600),
+            Duration::ZERO,
+        );
+        assert!(
+            matches!(&error, Error::Http(source) if source.is_connect() && source.url().is_none())
+        );
+        assert!(!error.to_string().contains("synthetic-secret"));
+    }
+
     #[test]
-    fn timeout_errors_state_the_boundary_and_duration() {
+    fn idle_timeout_states_the_boundary_and_duration() {
         let Error::Provider(idle) = stream_idle_timeout_error(Duration::from_secs(30 * 60)) else {
             panic!("idle timeout must be a provider error");
         };
         assert_eq!(
             idle,
             "provider stream idle timeout: no events received for 1800 seconds (30 minutes)"
-        );
-
-        let Error::Provider(request) = request_timeout_error(Duration::from_secs(60 * 60)) else {
-            panic!("request timeout must be a provider error");
-        };
-        assert_eq!(
-            request,
-            "provider request timed out after 3600 seconds (60 minutes)"
         );
     }
 }

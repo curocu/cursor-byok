@@ -9,9 +9,9 @@ from pathlib import Path
 
 
 def extract(source):
-    prefixes = dict(re.findall(r'var ([\w$]+)="([\w.]+\.)",\w+=class extends xe', source))
+    prefixes = dict(re.findall(r'var ([\w$]+)="([\w.]+\.)",[\w$]+=class extends [\w$]+', source))
     bases = {m[3]: m[2] for m in re.finditer(
-        r'var ([\w$]+)="([\w.]+\.)",([\w$]+)=class extends xe', source)}
+        r'var ([\w$]+)="([\w.]+\.)",([\w$]+)=class extends [\w$]+', source)}
     types = {}
     classes = list(re.finditer(r'([\w$]+)=class t extends ([\w$]+)\{', source))
     for index, match in enumerate(classes):
@@ -23,7 +23,7 @@ def extract(source):
         fields = json.loads(descriptor[1]).split('|')
         types[match[1]] = dict(name=bases[match[2]] + fields[0], fields=fields[1:],
                                refs=descriptor[2].lstrip(',').split(',') if descriptor[2] else [])
-    for match in re.finditer(r'([\w$]+)=Re\(l,([\w$]+),"([\w.]+)",(\[\[.*?\]\])(?:,[^)]*)?\)', source):
+    for match in re.finditer(r'([\w$]+)=[\w$]+\(l,([\w$]+),"([\w.]+)",(\[\[.*?\]\])(?:,[^)]*)?\)', source):
         if match[2] in prefixes:
             types[match[1]] = dict(name=prefixes[match[2]] + match[3], enum=json.loads(match[4]))
     for key, name in re.findall(r'([\w$]+)\.typeName="(google\.protobuf\.[\w.]+)"', source):
@@ -58,7 +58,7 @@ def generate(types, roots):
         if token.startswith('#'):
             return short[item['refs'][int(token[1:])]]
         return scalars[int(token)]
-    lines = ['// Extracted from Cursor 3.27.22 Agent harness b951911e4476.',
+    lines = ['// Extracted from the installed Cursor Agent harness.',
              '// Wire contracts only; no application code is executed or embedded.',
              'syntax = "proto3";', 'package cursorbyok.inference;', '']
     for filename in ['struct', 'empty', 'timestamp', 'duration', 'wrappers', 'any']:

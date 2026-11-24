@@ -116,7 +116,7 @@ impl ConversationOutput {
             if !self.superseded.is_cancelled() {
                 self.abort_execs().await;
                 let (category, summary) = match error {
-                    Error::Provider(_) | Error::Http(_) => ("provider", error.to_string()),
+                    Error::Provider(_) | Error::ProviderHttp { .. } | Error::Http(_) => ("provider", error.to_string()),
                     Error::Store(_) | Error::Database(_) | Error::Migration(_) => {
                         ("store", error.to_string())
                     }
@@ -1045,7 +1045,7 @@ pub(crate) fn finish_failed(handle: &TransportHandle, error: &Error) -> Result<(
         details: Vec::new(),
     };
     let stream_error = match error {
-        Error::Provider(_) | Error::Http(_) => {
+        Error::Provider(_) | Error::ProviderHttp { .. } | Error::Http(_) => {
             let detail = ai::ErrorDetails {
                 error: ai::error_details::Error::ProviderError as i32,
                 details: Some(ai::CustomErrorDetails {
@@ -1055,6 +1055,7 @@ pub(crate) fn finish_failed(handle: &TransportHandle, error: &Error) -> Result<(
                     is_retryable: Some(true),
                     show_request_id: Some(true),
                     should_show_immediate_error: Some(false),
+                    additional_info: Default::default(),
                 }),
                 is_expected: Some(true),
             };

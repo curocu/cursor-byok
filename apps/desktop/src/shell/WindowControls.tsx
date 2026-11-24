@@ -59,8 +59,8 @@ export function WindowControls() {
     <button
       type="button"
       className={[styles.button, styles.close].join(" ")}
-      aria-label={t("关闭窗口")}
-      title={t("关闭窗口")}
+      aria-label={t("关闭到托盘")}
+      title={t("关闭到托盘，后台服务继续运行")}
       onClick={() => void appWindow.close()}
     >
       <Icon icon={windowCloseIcon} size="1.1em" />

@@ -20,6 +20,10 @@ const MODEL_COLUMNS: &str = r#"
 "#;
 
 impl Store {
+    pub async fn chat_models(&self) -> Result<Vec<ModelConfig>> {
+        Ok(self.models().await?.into_iter().filter(|model| !model.is_image_generation()).collect())
+    }
+
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
         let query =
             format!("SELECT {MODEL_COLUMNS} FROM model_configs ORDER BY sort_order, display_name");
@@ -121,6 +125,16 @@ impl Store {
                 .execute(&mut *transaction)
                 .await?;
         }
+        let image_settings = self.image_generation_settings().await?;
+        if image_settings.model_hash == current_hash {
+            if !matches!(input.openai_endpoint.as_str(), crate::model::OPENAI_IMAGES_ENDPOINT | crate::model::OPENAI_RESPONSES_IMAGE_ENDPOINT) || input.model_type != ModelType::OpenAi {
+                return Err(Error::Config("disable or change the default image model before switching its protocol to chat".into()));
+            }
+            sqlx::query("UPDATE service_settings SET value_json = ?, updated_at_ms = ? WHERE setting_key = ?")
+                .bind(serde_json::to_string(&super::ImageGenerationSettings { model_hash: next_hash.clone() })?)
+                .bind(now).bind(super::image_generation::IMAGE_SETTINGS_KEY)
+                .execute(&mut *transaction).await?;
+        }
         let result = sqlx::query(
             r#"UPDATE model_configs SET
                 model_hash = ?, sort_order = ?, display_name = ?, group_name = ?, model_type = ?, base_url = ?,
@@ -171,6 +185,9 @@ impl Store {
 
     pub async fn delete_model(&self, hash: &str) -> Result<()> {
         let _write = self.writes.lock().await;
+        if self.image_generation_settings().await?.model_hash == hash {
+            return Err(Error::Config("disable or change the default image model before deleting it".into()));
+        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query("UPDATE llm_calls SET model_hash = NULL WHERE model_hash = ?")
             .bind(hash)

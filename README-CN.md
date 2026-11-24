@@ -1,52 +1,39 @@
 # Cursor BYOK 配置说明
 
-[返回项目首页](./README.md) · [下载 Windows 1.0.6](https://github.com/curocu/cursor-byok/releases/tag/windows-v1.0.6) · [English](./README-EN.md)
+[项目首页](./README.md) · [Windows 下载](https://github.com/curocu/cursor-byok/releases/tag/windows-v1.0.24) · [English](./README-EN.md)
 
-## 安装和升级
+从旧版升级可查看 [1.0.24 完整更新记录](./docs/releases/1.0.24.md)。
 
-下载本仓库 Release 中的免安装 EXE 或 x64 安装包。安装包可选择 D 盘目录；运行应用不需要开发工具链。
+## 聊天模型
 
-升级前退出旧 BYOK，并确保没有另一个测试后台同时接管 Cursor。启动新版，在 Cursor 配置页按提示完成本地证书和接管配置；接管过程中可能关闭 Cursor，之后重新打开即可。
+在 BYOK 的 **Cursor** 页面添加模型。按照服务商提供的 API 选择协议：
 
-当前应用内更新仍指向上游，本分支暂时通过本仓库 Release 手动升级。
+- **OpenAI Chat Completions** 使用 `/v1/chat/completions`。
+- **OpenAI Responses** 使用 `/v1/responses`。
+- **Claude / Anthropic Messages** 使用 `/v1/messages`。
 
-## 选择接口
+填写服务基础地址，或启用完整请求地址后填写完整 URL。填入服务商提供的 API Key 和模型 ID。显示名称用于 Cursor 菜单，分组可以帮助区分同名通道。上下文窗口、输出上限和思考参数按服务商支持范围配置。
 
-接口取决于服务商提供的 API，不能仅根据 GPT、DeepSeek 等模型名称判断。
+保存并运行连接测试后，在 Cursor 中选择该模型。Cursor 在下次读取模型目录时收到更新。需要立即刷新时，打开 **Cursor Settings → Models → Refresh model list**。
 
-- **OpenAI Chat Completions**：用于兼容 `/v1/chat/completions` 的模型服务。
-- **OpenAI Responses**：用于兼容 `/v1/responses` 的模型服务。
-- **Claude / Anthropic Messages**：用于兼容 `/v1/messages` 的模型服务。
+## 图片生成
 
-同一模型可能由不同服务商提供不同接口，选择后应运行连接测试。工具调用和思考参数也必须由上游实际支持。
+打开 **系统设置 → 图片生成**，选择 **管理模型**，添加 Images API 或 Responses 生图模型。选择一个默认生图模型后，Cursor Agent 可通过原生生图工具调用它。生图模型单独设置。
 
-## 填写模型配置
+在 **生图参数** 中可配置尺寸、画质、格式、背景、内容审核、生成复杂度和压缩率。未指定时采用模型配置或让上游决定。压缩率用于 JPEG 和 WebP，透明背景使用 PNG 或 WebP。扩展尺寸、自定义分辨率和部分选项依赖上游支持。
 
-- **服务地址**：填写基础地址，由 BYOK 追加标准端点；或启用完整 URL，直接使用完整请求地址。
-- **API Key**：填写该服务商的访问密钥。
-- **模型 ID**：填写服务商接受的模型标识，以服务商接口或模型列表为准。
-- **显示名称**：用于 Cursor 模型列表显示，不改变发送给上游的模型 ID。
-- **分组**：用于区分同名模型的不同通道；未设置时，列表徽章会使用服务地址的主机名。
-- **上下文、输出和思考参数**：根据模型服务支持的范围填写；自定义 Headers 和额外参数使用 JSON 对象。
-
-保存并测试后，重新打开 Cursor，新建聊天并选择该模型。`Auto` 使用官方模型，不会自动选择自定义 BYOK 通道。
-
-## 模型列表刷新
-
-BYOK 保存配置后立即写入本地数据库，但没有主动向 Cursor 推送列表的机制。Cursor 下一次请求模型目录时才会读取最新内容。
-
-可先点击 Cursor 模型设置页的刷新按钮；仍未更新时，按 `Ctrl+Shift+P`，执行 `Developer: Reload Window`，然后重新选择模型。
-
-不同通道可以使用相同显示名称，此时请结合来源徽章区分。当前修改地址、密钥、模型 ID 或显示名称可能改变内部 ID，因此原来的关闭状态可能无法沿用；1.0.6 尚未修复这一问题。
-
-## 1.0.6 的路由提示
-
-本版本不再向 Cursor 回传 `routed_model_display_name`，用于隐藏 “Routed to …” 及对应评价按钮。实际模型路由、工具调用和流式回复逻辑不变。
-
-旧聊天已保存的提示可能继续保留，需在新聊天中验证。此改动不隐藏模型选择器中的模型名称或通道来源。
+点击 **生图测试** 后输入描述，可临时选择模型和参数。生成成功后点击 **查看图片** 打开预览。
 
 ## 问题反馈
 
-请在[本仓库 Issues](https://github.com/curocu/cursor-byok/issues)提供 Cursor 版本、BYOK 版本、接口类型、复现步骤和脱敏错误信息。不要提交 API Key、完整请求头或本地数据库。
+请提供 Cursor 与 BYOK 版本、上游协议、可复现步骤、发生时间和脱敏后的错误信息。有 Request ID 时可一并提供。请勿贴出 API Key、完整请求头、私人聊天或数据库。 [提交问题](https://github.com/curocu/cursor-byok/issues)
 
-已验证范围、现有限制和构建方法见[项目首页](./README.md)和 [Windows 适配说明](./docs/cursor-3.27.22-windows.md)。
+## 从源码构建
+
+Windows 构建需要 Rust MSVC 工具链、Visual Studio C++ Build Tools、Windows SDK、Node.js / npm 和 CMake。桌面应用使用 WebView2。在仓库根目录执行以下命令，按实际安装位置调整 CMake 路径。
+
+```powershell
+.\scripts\build-windows.ps1 -CMakeBin 'D:\devtools\cmake-3.31.12-windows-x86_64\bin'
+```
+
+脚本默认将缓存和构建产物写到 `D:\devtools\cursor-byok`，可通过 `-BuildRoot` 指定其他目录。已安装此分支的用户可从 GitHub Releases 手动升级，应用内更新仍指向上游。

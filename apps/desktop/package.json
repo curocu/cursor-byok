@@ -1,12 +1,13 @@
 {
   "name": "cursor-byok-desktop",
-  "version": "1.0.6",
+  "version": "1.0.24",
   "description": "Cursor BYOK desktop management application",
   "type": "module",
   "scripts": {
     "start": "vite",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
+    "test:theme": "node --experimental-vm-modules --test src/shared/store/appStore.test.mjs",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "i18n:scan": "cross-env STATIC_I18N_SCAN=true vite build",
     "build": "vite build",

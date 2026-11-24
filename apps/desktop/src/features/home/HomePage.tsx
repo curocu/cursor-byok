@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, pluginText, type Overview } from "../../shared/api";
+import { api, type Overview } from "../../shared/api";
 import { ContributionCalendarChart } from "./charts/ContributionCalendarChart";
 import { DailyTokenUsageChart } from "./charts/DailyTokenUsageChart";
 import { HomeMetrics } from "./metrics/HomeMetrics";
@@ -10,8 +10,7 @@ import { PageActions } from "../../shell/PageActions";
 import { appStore, useAppStore } from "../../shared/store/appStore";
 import { formatTimeInput, parseTimeInput } from "../../shared/utils/parseTimeInput";
 import { modelProviderName } from "../../shared/utils/modelProvider";
-import { claudeIcon, flatColorOrganizationIcon, openAiIcon } from "../../shared/ui/icons";
-import { useI18n } from "../../i18n/store";
+import { claudeIcon, openAiIcon } from "../../shared/ui/icons";
 
 type TimeRange = { startMs: number; endMs: number };
 
@@ -53,8 +52,7 @@ function presetRange(preset: Exclude<OverviewRangePreset, "custom">, now = new D
 }
 
 export function HomePage() {
-  const { overview, busy, models, plugins } = useAppStore();
-  const { locale } = useI18n();
+  const { overview, busy, models } = useAppStore();
   const [preset, setPreset] = useState<OverviewRangePreset>("month");
   const [quick, setQuick] = useState<QuickPreset | null>(null);
   const [customRange, setCustomRange] = useState<TimeRange | null>(null);
@@ -147,15 +145,6 @@ export function HomePage() {
       group: modelProviderName(model),
       icon: iconFor(model.type),
     })),
-    ...plugins.flatMap((plugin) => plugin.providers.flatMap((provider) =>
-      provider.configured ? provider.models.filter((model) => model.enabled).map((model) => ({
-        value: model.id,
-        label: model.displayName,
-        group: pluginText(provider.displayName, locale) || model.pluginName,
-        iconSrc: model.icon || undefined,
-        icon: model.icon ? undefined : flatColorOrganizationIcon,
-      })) : [],
-    )),
   ];
   const sections: VirtualPageSection[] = [
     {

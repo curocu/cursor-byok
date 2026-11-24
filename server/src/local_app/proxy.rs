@@ -187,6 +187,7 @@ fn is_local_path(path: &str) -> bool {
             | "/aiserver.v1.AiService/KnowledgeBaseUpdate"
             | "/aiserver.v1.AiService/KnowledgeBaseRemove"
             | "/aiserver.v1.AiService/WriteGitCommitMessage"
+            | "/aiserver.v1.AiService/RunGenerateImage"
             | "/aiserver.v1.NetworkService/IsConnected"
             | "/aiserver.v1.AnalyticsService/BootstrapStatsig"
             | "/auth/full_stripe_profile"
@@ -205,6 +206,7 @@ mod tests {
     #[test]
     fn cursor_cli_transport_and_model_metadata_routes_stay_local() {
         for path in [
+            "/aiserver.v1.AiService/RunGenerateImage",
             "/aiserver.v1.InferenceService/RunInferenceSSE",
             "/aiserver.v1.InferenceService/RecordAgentFollowupClassification",
             "/aiserver.v1.InferenceService/RecordAgentPostTurnLabeling",

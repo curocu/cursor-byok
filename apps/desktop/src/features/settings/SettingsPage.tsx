@@ -4,7 +4,7 @@ import { PageContent } from "../../shell/layout/PageContent";
 import { LegacyModelImport } from "../models/LegacyModelImport";
 import { AppLifecycleSettingsCard } from "./AppLifecycleSettingsCard";
 import { CommitSettingsCard } from "./CommitSettingsCard";
-import { ExternalApiSettingsCard } from "./ExternalApiSettingsCard";
+import { ImageGenerationSettingsCard } from "./ImageGenerationSettingsCard";
 import { PricingSettingsCard } from "./PricingSettingsCard";
 import { ProxySettingsCard } from "./ProxySettingsCard";
 import { TabSettingsCard } from "./TabSettingsCard";
@@ -21,7 +21,7 @@ import { themeOptions } from "../../shared/theme/theme";
 import styles from "./SettingsPage.module.scss";
 
 export function SettingsPage() {
-  const { detailed, ports, theme } = useAppStore();
+  const { detailed, ports, theme, themeReady, themeBusy, themeError } = useAppStore();
   const { preference, locale } = useI18n();
   const message = useMessage();
   const [proxyPort, setProxyPort] = useState(String(ports.proxy_port));
@@ -225,9 +225,9 @@ export function SettingsPage() {
           </div>
         </div>
       </TitledCard>
-      <ExternalApiSettingsCard servicePort={ports.service_port} />
       <ProxySettingsCard settings={outboundProxy} draft={proxyDraft} editing={editingProxy} saving={savingProxy} onDraftChange={setProxyDraft} onEdit={editProxy} onCancel={cancelProxyEdit} onSave={() => void saveProxy()} />
       <TabSettingsCard settings={tabSettings} draft={tabDraft} editing={editingTab} saving={savingTab} onDraftChange={setTabDraft} onEdit={editTab} onCancel={cancelTabEdit} onSave={() => void saveTab()} />
+      <ImageGenerationSettingsCard />
       <CommitSettingsCard />
       <PricingSettingsCard />
       <AppLifecycleSettingsCard />
@@ -269,12 +269,17 @@ export function SettingsPage() {
             <button
               className={theme === id ? styles.selected : ""}
               key={id}
-              onClick={() => appStore.selectTheme(id)}
+              disabled={!themeReady || themeBusy}
+              aria-pressed={themeReady && theme === id}
+              onClick={() => void appStore.selectTheme(id)}
             >
               {id === "default-dark" ? t("默认暗色") : t("默认亮色")}
             </button>
           ))}
         </div>
+        {themeBusy && <p role="status">{t("正在保存或读取主题…")}</p>}
+        {themeError && <p role="alert">{t("主题设置失败：{error}", { error: themeError })}</p>}
+        {!themeReady && <Button disabled={themeBusy} onClick={() => void appStore.loadTheme()}>{t("重试读取主题")}</Button>}
       </TitledCard>
       <TitledCard title={t("存储管理")}>
         <div className={styles.storageRow}>

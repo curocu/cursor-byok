@@ -101,7 +101,7 @@ pub(crate) fn from_requested(
             "effort" | "reasoning" => {
                 let effort = parameter.value.trim();
                 spec.reasoning.effort =
-                    (effort != "none" && !effort.is_empty()).then(|| effort.to_string());
+                    (!matches!(effort, "none" | "default" | "")).then(|| effort.to_string());
                 spec.reasoning.enabled |= spec.reasoning.effort.is_some();
             }
             "thinking" => spec.reasoning.enabled |= parse_bool(parameter)?,

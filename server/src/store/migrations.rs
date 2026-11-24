@@ -456,7 +456,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(checksum_after, checksum_before);
-            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
             assert_eq!(checkpoint_table_exists, 1);
             assert_eq!(argument_error_column_exists, 1);
         }
@@ -469,6 +469,60 @@ mod tests {
             sidecar_path(database, "-wal"),
             PathBuf::from(r"C:\Users\Test User\cursor-byok.db-wal")
         );
+    }
+
+    #[tokio::test]
+    async fn existing_capability_migration_history_can_start_without_reapplying_it() {
+        for line_endings in [MigrationLineEndings::Lf, MigrationLineEndings::Crlf] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            let mut migrations = migrator_with_line_endings(line_endings)
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>();
+            let sql = "ALTER TABLE model_configs ADD COLUMN cursor_capabilities_json TEXT NOT NULL DEFAULT '{}';\n";
+            migrations.push(Migration::new(
+                13,
+                "cursor capabilities".into(),
+                sqlx::migrate::MigrationType::Simple,
+                Cow::Owned(match line_endings {
+                    MigrationLineEndings::Lf => sql.to_owned(),
+                    MigrationLineEndings::Crlf => sql.replace('\n', "\r\n"),
+                }),
+                false,
+            ));
+            Migrator {
+                migrations: Cow::Owned(migrations),
+                ..Migrator::DEFAULT
+            }
+            .run(&pool)
+            .await
+            .unwrap();
+            let history_before: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+                "SELECT version, checksum FROM _sqlx_migrations ORDER BY version",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+            for _ in 0..2 {
+                run(&pool, Path::new("upgraded-database.db"))
+                    .await
+                    .unwrap();
+            }
+
+            let history_after: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+                "SELECT version, checksum FROM _sqlx_migrations ORDER BY version",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(history_after, history_before);
+        }
     }
 
     #[tokio::test]

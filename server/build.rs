@@ -44,6 +44,11 @@ fn main() {
         "ERROR_PROVIDER_ERROR = 57;",
         "CustomErrorDetails details = 2;",
         "optional bool is_expected = 3;",
+        "message RunGenerateImageRequest",
+        "repeated GenerateImageReferenceImage reference_images = 2;",
+        "optional string aspect_ratio = 5;",
+        "optional int32 provider_status_code = 3;",
+        "bool content_safety_blocked = 4;",
     ] {
         assert!(
             aiserver_source.contains(required),

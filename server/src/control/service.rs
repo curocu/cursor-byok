@@ -25,11 +25,10 @@ use crate::{
         ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent, ProjectedMessage,
         PromptSpec, ProviderType, Role,
     },
-    plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
-        CommitSettings, DesktopSettings, ExternalApiSettings, PortSettings, ProxySettings,
-        ProxySettingsInput, StatisticsStorage, Store, TabSettings, TokenPricingSettings,
+        CommitSettings, DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput,
+        StatisticsStorage, Store, TabSettings, ThemeId, TokenPricingSettings,
     },
     Error, Result,
 };
@@ -39,8 +38,6 @@ pub struct ControlService {
     store: Store,
     cursor_harness: CursorHarness,
     provider: Arc<dyn Provider>,
-    plugin_runtime: PluginRuntime,
-    plugins: PluginRegistry,
     clients: crate::network::NetworkClients,
     app_version: String,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
@@ -100,6 +97,8 @@ fn empty_json_object_ref() -> &'static serde_json::Value {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelConnectivityResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::provider::image_generation::GeneratedImage>,
     pub duration_ms: u64,
     pub first_valid_response_ms: Option<u64>,
     pub output_tokens: u64,
@@ -148,11 +147,17 @@ pub struct ObservabilitySettings {
 }
 
 impl ControlService {
+    pub async fn image_generation_settings(&self) -> Result<crate::store::ImageGenerationSettings> {
+        self.store.image_generation_settings().await
+    }
+
+    pub async fn set_image_generation_settings(&self, settings: crate::store::ImageGenerationSettings) -> Result<crate::store::ImageGenerationSettings> {
+        self.store.set_image_generation_settings(settings).await
+    }
+
     pub fn new(
         store: Store,
         provider: Arc<dyn Provider>,
-        plugin_runtime: PluginRuntime,
-        plugins: PluginRegistry,
         clients: crate::network::NetworkClients,
         app_version: String,
     ) -> Result<Self> {
@@ -160,8 +165,6 @@ impl ControlService {
             cursor_harness: CursorHarness::new(store.clone())?,
             store,
             provider,
-            plugin_runtime,
-            plugins,
             clients,
             app_version,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
@@ -170,116 +173,6 @@ impl ControlService {
 
     pub fn cursor_harness(&self) -> &CursorHarness {
         &self.cursor_harness
-    }
-
-    pub async fn plugins(&self) -> Vec<PluginDescriptor> {
-        self.plugins.plugins().await
-    }
-
-    pub async fn plugin_oauth_begin(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        method_id: &str,
-    ) -> Result<crate::plugin::OAuthBeginResponse> {
-        self.plugins
-            .oauth_begin(plugin_id, resource_type, method_id)
-            .await
-    }
-
-    pub async fn plugin_oauth_poll(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::plugin::OAuthPollResponse> {
-        self.plugins.oauth_poll(session_id).await
-    }
-
-    pub async fn plugin_import(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        files: serde_json::Value,
-    ) -> Result<crate::plugin::ImportResponse> {
-        self.plugins
-            .import_resources(plugin_id, resource_type, files)
-            .await
-    }
-
-    pub async fn plugin_export_resources(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .export_resources(plugin_id, resource_type)
-            .await
-    }
-
-    pub async fn plugin_refresh_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .refresh_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_resource_action(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-        action_id: &str,
-        input: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .resource_action(plugin_id, resource_type, resource_id, action_id, input)
-            .await
-    }
-
-    pub async fn plugin_delete_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .delete_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_sync_models(&self, plugin_id: &str, provider_id: &str) -> Result<usize> {
-        self.plugins.sync_models(plugin_id, provider_id).await
-    }
-
-    pub async fn plugin_set_model_enabled(
-        &self,
-        plugin_id: &str,
-        provider_id: &str,
-        model_id: &str,
-        enabled: bool,
-    ) -> Result<()> {
-        self.plugins
-            .set_model_enabled(plugin_id, provider_id, model_id, enabled)
-            .await
-    }
-
-    pub async fn remove_plugin_configuration(&self, plugin_id: &str) -> Result<()> {
-        self.plugins.remove(plugin_id).await
-    }
-
-    pub fn plugin_runtime_status(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.status()
-    }
-
-    pub fn initialize_plugin_runtime(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.initialize(self.store.clone())
-    }
-
-    pub fn cancel_plugin_runtime_initialization(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.cancel_initialization()
     }
 
     pub(super) async fn ads(
@@ -385,6 +278,8 @@ impl ControlService {
         &self,
         model_hash: &str,
         test_id: &str,
+        image_prompt: Option<&str>,
+        image_options: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ModelConnectivityResult> {
         let cancellation = CancellationToken::new();
         let cancellation = {
@@ -397,7 +292,7 @@ impl ControlService {
                 .or_insert_with(|| cancellation.clone())
                 .clone()
         };
-        let result = self.run_model_test(model_hash, cancellation).await;
+        let result = self.run_model_test(model_hash, image_prompt, image_options, cancellation).await;
         self.model_tests
             .lock()
             .expect("model test registry mutex poisoned")
@@ -419,25 +314,42 @@ impl ControlService {
     async fn run_model_test(
         &self,
         model_hash: &str,
+        image_prompt: Option<&str>,
+        image_options: Option<&serde_json::Map<String, serde_json::Value>>,
         cancellation: CancellationToken,
     ) -> Result<ModelConnectivityResult> {
         const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
         const TEST_PROMPT: &str = "Output the numbers 1 through 120 separated by a single space. No commas, no newlines, no explanation.";
 
         let mut model = ModelSpec::new(model_hash);
-        if model_hash.starts_with(crate::plugin::ADAPTER_ID_PREFIX) {
-            let descriptor = self.plugins.model_descriptor(model_hash).await?;
-            model.display_name = Some(descriptor.display_name);
-            model.max_output_tokens = Some(descriptor.max_output_tokens.unwrap_or(65_536));
-        } else {
-            let configured = self
-                .store
-                .model(model_hash)
-                .await?
-                .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
-            configured.configure(&mut model);
-            model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
+        let mut configured = self
+            .store
+            .model(model_hash)
+            .await?
+            .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
+        if configured.is_image_generation() {
+            if let Some(options) = image_options { super::image_options::apply(&mut configured, options)?; }
+            let description = image_prompt.unwrap_or_default().trim();
+            if description.is_empty() || description.chars().count() > 16_000 {
+                return Err(Error::Config("image test description must contain 1 to 16000 characters".into()));
+            }
+            let started = Instant::now();
+            let image = crate::provider::image_generation::generate(
+                &self.store, &configured,
+                &crate::cursor::protocol::proto::aiserver::v1::RunGenerateImageRequest {
+                    description: description.into(),
+                    ..Default::default()
+                },
+                &cancellation, crate::provider::image_generation::IMAGE_TIMEOUT,
+            ).await.map_err(|error| Error::Provider(error.to_string()))?;
+            return Ok(ModelConnectivityResult {
+                image: Some(image), duration_ms: started.elapsed().as_millis() as u64,
+                first_valid_response_ms: None, output_tokens: 0, tokens_per_second: 0.0,
+                tokens_estimated: false, output: String::new(),
+            });
         }
+        configured.configure(&mut model);
+        model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
         let call_id = format!("model-test-{}", uuid::Uuid::new_v4());
         let invocation = ModelInvocation {
             call_id: call_id.clone(),
@@ -527,6 +439,7 @@ impl ControlService {
         let tokens_estimated = output_tokens.is_none();
         let output_tokens = output_tokens.unwrap_or_else(|| estimate_output_tokens(&output));
         Ok(ModelConnectivityResult {
+            image: None,
             duration_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
             first_valid_response_ms: first_valid_response_at.map(|first| {
                 first
@@ -695,17 +608,6 @@ impl ControlService {
         self.store.port_settings().await
     }
 
-    pub async fn external_api_settings(&self) -> Result<ExternalApiSettings> {
-        self.store.external_api_settings().await
-    }
-
-    pub async fn set_external_api_settings(
-        &self,
-        settings: ExternalApiSettings,
-    ) -> Result<ExternalApiSettings> {
-        self.store.set_external_api_settings(settings).await
-    }
-
     pub async fn set_ports(&self, settings: PortSettings) -> Result<PortSettings> {
         self.store.set_port_settings(settings).await?;
         Ok(settings)
@@ -746,6 +648,14 @@ impl ControlService {
 
     pub async fn set_tab_settings(&self, settings: TabSettings) -> Result<TabSettings> {
         self.cursor_harness.set_tab_settings(settings).await
+    }
+
+    pub async fn theme(&self) -> Result<ThemeId> {
+        self.store.theme().await
+    }
+
+    pub async fn set_theme(&self, theme: ThemeId) -> Result<ThemeId> {
+        self.store.set_theme(theme).await
     }
 
     pub async fn desktop_settings(&self) -> Result<DesktopSettings> {
@@ -881,17 +791,13 @@ async fn discover_models_from_endpoint(
     custom_headers: &serde_json::Value,
 ) -> Result<DiscoveredModels> {
     let mut models = match provider_type {
-        ProviderType::OpenAiChat | ProviderType::OpenAiResponses => {
+        ProviderType::OpenAiChat | ProviderType::OpenAiResponses | ProviderType::OpenAiImages => {
             openai_models(client, base_url, api_key, custom_headers).await?
         }
         ProviderType::Anthropic => {
             anthropic_models(client, base_url, api_key, custom_headers).await?
         }
-        ProviderType::Plugin => {
-            return Err(Error::Config(
-                "plugin providers discover models through their plugin".into(),
-            ))
-        }
+        ProviderType::Plugin => unreachable!("historical call types cannot discover models"),
     };
     models.sort();
     models.dedup();

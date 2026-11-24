@@ -1,4 +1,6 @@
 //! HTTP/1 inference sessions. Cursor owns the Agent loop; this service owns model calls.
+mod cancellation;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -11,7 +13,7 @@ use std::{
 use axum::{
     body::{to_bytes, Body},
     extract::Extension,
-    http::{header, Request, Response},
+    http::{header, HeaderMap, Request, Response},
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -40,6 +42,7 @@ pub struct InferenceService {
 }
 struct ServiceInner {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    runs: parking_lot::Mutex<cancellation::RunCancellations>,
     store: Store,
     provider: Arc<dyn Provider>,
 }
@@ -47,6 +50,7 @@ struct Session {
     commands: mpsc::Sender<(i64, pb::RunInferenceClientMessage)>,
     output: Arc<OutputHub>,
     cancellation: CancellationToken,
+    work_cancellation: CancellationToken,
     route: AtomicU8,
     route_changed: Notify,
 }
@@ -56,6 +60,7 @@ impl InferenceService {
         Self {
             inner: Arc::new(ServiceInner {
                 sessions: Mutex::new(HashMap::new()),
+                runs: parking_lot::Mutex::default(),
                 store: registry.store().clone(),
                 provider: registry.conversations().dependencies().provider.clone(),
             }),
@@ -72,6 +77,7 @@ impl InferenceService {
             commands,
             output: Arc::default(),
             cancellation: CancellationToken::new(),
+            work_cancellation: self.inner.runs.lock().token(id),
             route: AtomicU8::new(0),
             route_changed: Notify::new(),
         });
@@ -94,6 +100,8 @@ impl InferenceService {
             }
             actor.output.close();
             actor.cancellation.cancel();
+            actor.work_cancellation.cancel();
+            service.inner.runs.lock().finish(&request_id);
             service.inner.sessions.lock().await.remove(&request_id);
         });
         session
@@ -101,7 +109,11 @@ impl InferenceService {
 
     /// The shared Bidi endpoint carries messages for distinct RPC services.
     /// Only claim a new session when its first frame has the inference run schema.
-    pub async fn append(&self, request: &ai::BidiAppendRequest) -> Result<Option<bool>> {
+    pub async fn append(
+        &self,
+        request: &ai::BidiAppendRequest,
+        headers: &HeaderMap,
+    ) -> Result<Option<bool>> {
         let id = request
             .request_id
             .as_ref()
@@ -128,12 +140,32 @@ impl InferenceService {
             Some(session) => session,
             None => self.session(id).await,
         };
+        self.link_headers(id, headers)?;
         session
             .commands
             .send((request.append_seqno, message))
             .await
             .map_err(|_| Error::Protocol("inference session is closed".into()))?;
         Ok(Some(wait_route(&session).await?))
+    }
+
+    fn link_headers(&self, id: &str, headers: &HeaderMap) -> Result<()> {
+        // Current local Agent runtimes carry lineage on the Bidi/SSE transport,
+        // even when the per-model inference request has no parent fields.
+        let header = |name| {
+            headers
+                .get(name)
+                .map(|value| value.to_str())
+                .transpose()
+                .map_err(|error| Error::Protocol(format!("invalid {name} header: {error}")))
+        };
+        let parent = header("x-parent-request-id")?;
+        let root = header("x-root-parent-request-id")?;
+        let original = header("x-original-request-id")?;
+        let mut runs = self.inner.runs.lock();
+        runs.link_original(id, original);
+        runs.link(id, parent, root);
+        Ok(())
     }
 
     async fn run(
@@ -193,8 +225,7 @@ impl InferenceService {
                             .as_ref()
                             .ok_or_else(|| Error::Protocol("inference model is required".into()))?;
                         let configured = self.inner.store.model(&model.model_id).await?;
-                        let local = configured.is_some()
-                            || model.model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX);
+                        let local = configured.is_some();
                         session
                             .route
                             .store(if local { 1 } else { 2 }, Ordering::Release);
@@ -202,31 +233,36 @@ impl InferenceService {
                         if !local {
                             continue;
                         }
-                        let mut ready = pb::RunInferenceRunReady {
+                        let metadata = crate::cursor::inference::prompt_metadata(
+                            &request,
+                            configured.as_ref(),
+                            &self.inner.store.chat_models().await?,
+                        );
+                        let max_context_tokens = metadata
+                            .agent_token_limit
+                            .expect("local inference context limit");
+                        let ready = pb::RunInferenceRunReady {
                             resolved_model: Some(model.clone()),
+                            supports_self_summary: true,
+                            prompt_model_metadata: Some(metadata),
                             accepts_client_heartbeat: true,
                             accepts_agent_events: true,
                             accepts_aborted_finish: true,
                             accepts_subagent_model_resolution: true,
                             ..Default::default()
                         };
-                        ready.prompt_model_metadata =
-                            Some(crate::cursor::inference::prompt_metadata(
-                                &request,
-                                configured.as_ref(),
-                                &self.inner.store.models().await?,
-                            ));
                         tracing::info!(%request_id, conversation_id=%request.conversation_id, model_id=%model.model_id, "routing RunInference to BYOK provider");
                         emit(
                             &session.output,
                             pb::run_inference_server_message::Message::RunReady(ready),
                         )?;
-                        selected = Some(request);
+                        selected = Some((request, max_context_tokens));
                     }
                     Some(M::InvokeModel(invoke)) => {
-                        let run = selected.as_ref().ok_or_else(|| {
+                        let (run, max_context_tokens) = selected.as_ref().ok_or_else(|| {
                             Error::Protocol("inference run must start before invocation".into())
                         })?;
+                        let max_context_tokens = *max_context_tokens;
                         let id = invoke.invocation_id.clone();
                         if id.is_empty() || calls.contains_key(&id) {
                             return Err(Error::Protocol(
@@ -241,20 +277,36 @@ impl InferenceService {
                                 Some(Error::Protocol(
                                     "unnegotiated delta/compressed inference request".into(),
                                 )),
+                                false,
                             )?;
                             continue;
                         }
                         let request = invoke.request.ok_or_else(|| {
                             Error::Protocol("inference invocation request is missing".into())
                         })?;
+                        self.inner.runs.lock().link(
+                            request_id,
+                            request.parent_request_id.as_deref(),
+                            request.root_parent_request_id.as_deref(),
+                        );
+                        if session.work_cancellation.is_cancelled() {
+                            end_invocation(
+                                &session.output,
+                                &id,
+                                Some(Error::Cancelled),
+                                self.inner.runs.lock().was_aborted(request_id),
+                            )?;
+                            continue;
+                        }
                         let model = run
                             .requested_model
                             .as_ref()
                             .expect("validated run model")
                             .clone();
-                        let cancellation = session.cancellation.child_token();
+                        let cancellation = session.work_cancellation.child_token();
                         calls.insert(id.clone(), cancellation.clone());
                         let provider = self.inner.provider.clone();
+                        let inner = self.inner.clone();
                         let output = session.output.clone();
                         let conversation = run.conversation_id.clone();
                         let run_id = request_id.to_owned();
@@ -266,6 +318,7 @@ impl InferenceService {
                                 &output,
                                 &request,
                                 &model,
+                                max_context_tokens,
                                 &conversation,
                                 &run_id,
                                 &id,
@@ -276,7 +329,8 @@ impl InferenceService {
                             if let Err(error) = &result {
                                 tracing::warn!(%run_id, invocation_id=%id, %error, "inference provider invocation failed");
                             }
-                            let _ = end_invocation(&output, &id, result.err());
+                            let aborted = inner.runs.lock().was_aborted(&run_id);
+                            let _ = end_invocation(&output, &id, result.err(), aborted);
                         });
                     }
                     Some(M::CancelInvocation(cancel)) => {
@@ -284,12 +338,16 @@ impl InferenceService {
                             token.cancel();
                         }
                     }
-                    Some(M::FinishRun(_)) => return Ok(()),
+                    Some(M::FinishRun(finish)) => {
+                        if finish.aborted {
+                            self.inner.runs.lock().abort(request_id);
+                        }
+                        return Ok(());
+                    }
                     Some(M::ResolveSubagentModels(request)) => {
                         let mut models = Vec::new();
                         for requested in request.requested_models {
-                            let valid = self.inner.store.model(&requested).await?.is_some()
-                                || requested.starts_with(crate::plugin::ADAPTER_ID_PREFIX);
+                            let valid = self.inner.store.model(&requested).await?.is_some();
                             models.push(pb::RunInferenceResolvedSubagentModel {
                                 requested: requested.clone(),
                                 resolved_slug: valid.then(|| requested.clone()),
@@ -346,19 +404,82 @@ fn emit(output: &OutputHub, message: pb::run_inference_server_message::Message) 
     })?);
     Ok(())
 }
-fn end_invocation(output: &OutputHub, id: &str, error: Option<Error>) -> Result<()> {
+fn end_invocation(output: &OutputHub, id: &str, error: Option<Error>, aborted: bool) -> Result<()> {
     emit(
         output,
         pb::run_inference_server_message::Message::InvocationEnd(pb::RunInferenceInvocationEnd {
             invocation_id: id.into(),
-            error: error.map(|error| pb::RunInferenceInvocationError {
-                code: match &error {
-                    Error::Cancelled => 1,
-                    Error::Protocol(_) | Error::Decode(_) | Error::Json(_) => 3,
-                    _ => 13,
-                },
-                message: error.to_string(),
-                ..Default::default()
+            error: error.map(|error| {
+                // Cursor's model loop requires Aborted to skip its retries;
+                // the outer Agent loop also requires USER_ABORTED_REQUEST.
+                if aborted && matches!(error, Error::Cancelled) {
+                    return pb::RunInferenceInvocationError {
+                        code: 10,
+                        message: "User aborted request".into(),
+                        details: vec![pb::RunInferenceErrorDetail {
+                            r#type: "aiserver.v1.ErrorDetails".into(),
+                            value: ai::ErrorDetails {
+                                error: ai::error_details::Error::UserAbortedRequest as i32,
+                                is_expected: Some(true),
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
+                        }],
+                        ..Default::default()
+                    };
+                }
+                if let Error::ProviderHttp { status, retry_after, .. } = &error {
+                    let (code, retryable) = match status {
+                        400 | 422 => (3, false),
+                        401 => (16, false),
+                        403 => (7, false),
+                        404 => (5, false),
+                        408 | 504 => (4, true),
+                        429 => (8, true),
+                        500..=599 => (14, true),
+                        _ => (9, false),
+                    };
+                    let mut additional_info = HashMap::from([
+                        ("upstreamHttpStatus".into(), status.to_string()),
+                    ]);
+                    if let Some(value) = retry_after {
+                        additional_info.insert("upstreamRetryAfter".into(), value.clone());
+                    }
+                    return pb::RunInferenceInvocationError {
+                        code,
+                        message: error.to_string(),
+                        details: vec![pb::RunInferenceErrorDetail {
+                            r#type: "aiserver.v1.ErrorDetails".into(),
+                            value: ai::ErrorDetails {
+                                // Upstream credentials/limits must not trigger
+                                // Cursor sign-in or subscription upgrade flows.
+                                error: if *status == 401 {
+                                    ai::error_details::Error::BadUserApiKey
+                                } else {
+                                    ai::error_details::Error::ProviderError
+                                } as i32,
+                                details: Some(ai::CustomErrorDetails {
+                                    title: format!("Upstream HTTP {status}"),
+                                    detail: error.to_string(),
+                                    is_retryable: Some(retryable),
+                                    additional_info,
+                                    ..Default::default()
+                                }),
+                                is_expected: Some(true),
+                            }.encode_to_vec(),
+                        }],
+                        ..Default::default()
+                    };
+                }
+                pb::RunInferenceInvocationError {
+                    code: match &error {
+                        Error::Cancelled => 1,
+                        Error::Protocol(_) | Error::Decode(_) | Error::Json(_) => 3,
+                        _ => 13,
+                    },
+                    message: error.to_string(),
+                    ..Default::default()
+                }
             }),
             ..Default::default()
         }),
@@ -371,18 +492,22 @@ async fn stream_invocation(
     output: &OutputHub,
     request: &pb::InferenceStreamRequest,
     model: &pb::InferenceRequestedModel,
+    max_context_tokens: i32,
     conversation: &str,
     run: &str,
     id: &str,
     index: u64,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let mut request = request.clone();
     let selected = request.requested_model.get_or_insert_with(|| model.clone());
     let model_id = selected.model_id.clone();
     let input = invocation(&request, &model_id, conversation, run, id, index)?;
     let mut stream = provider.stream(input, cancellation.clone());
-    let mut mapped = InvocationOutput::default();
+    let mut mapped = InvocationOutput::new(max_context_tokens);
     emit(
         output,
         pb::run_inference_server_message::Message::InvocationResponse(
@@ -400,7 +525,7 @@ async fn stream_invocation(
         ),
     )?;
     loop {
-        let event = tokio::select! { _ = cancellation.cancelled() => return Err(Error::Cancelled), event = stream.next() => event };
+        let event = tokio::select! { biased; _ = cancellation.cancelled() => return Err(Error::Cancelled), event = stream.next() => event };
         let Some(event) = event else {
             break;
         };
@@ -447,6 +572,7 @@ pub async fn stream(
         return Err(Error::Protocol("inference request ID is required".into()));
     }
     let session = service.session(&id.request_id).await;
+    service.link_headers(&id.request_id, &parts.headers)?;
     if !wait_route(&session).await? {
         return proxy::forward(
             Extension(proxy),

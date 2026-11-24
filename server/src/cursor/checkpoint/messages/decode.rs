@@ -148,12 +148,9 @@ fn decode_text(value: &Value) -> Result<MessageContent> {
             }),
             Some("image") => {
                 let mime_type = required_string(part, "mimeType")?;
-                let encoded = required_string(part, "image")?;
                 Ok(ContentPart::Image {
                     mime_type: mime_type.into(),
-                    data: STANDARD.decode(encoded).map_err(|error| {
-                        Error::Protocol(format!("invalid Cursor image base64: {error}"))
-                    })?,
+                    data: decode_image(part)?,
                 })
             }
             Some(kind) => Err(Error::Protocol(format!(
@@ -165,6 +162,23 @@ fn decode_text(value: &Value) -> Result<MessageContent> {
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(MessageContent::Parts { parts })
+}
+
+fn decode_image(part: &Value) -> Result<Vec<u8>> {
+    let image = part
+        .get("image")
+        .ok_or_else(|| Error::Protocol("Cursor message is missing image".into()))?;
+    if let Some(encoded) = image.as_str() {
+        return STANDARD
+            .decode(encoded)
+            .map_err(|error| Error::Protocol(format!("invalid Cursor image base64: {error}")));
+    }
+    if image.get("__type").and_then(Value::as_str) == Some("Uint8Array") {
+        let encoded = required_string(image, "hex")?;
+        return hex::decode(encoded)
+            .map_err(|error| Error::Protocol(format!("invalid Cursor image hex: {error}")));
+    }
+    Err(Error::Protocol("unsupported Cursor image encoding".into()))
 }
 
 fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> {

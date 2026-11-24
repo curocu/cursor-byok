@@ -8,12 +8,20 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::store::{
-    CommitPromptLocale, CommitSettings, DesktopSettings, ExternalApiSettings, PortSettings,
-    ProxySettings, ProxySettingsInput, StatisticsStorage, StatisticsStorageScope, TabSettings,
+    CommitPromptLocale, CommitSettings, DesktopSettings, PortSettings, ProxySettings,
+    ProxySettingsInput, StatisticsStorage, StatisticsStorageScope, TabSettings, ThemeId,
     TokenPricingSettings,
 };
 
 use super::{ControlService, ObservabilitySettings};
+
+pub async fn get_image_generation(State(service): State<ControlService>) -> Result<Json<crate::store::ImageGenerationSettings>> {
+    Ok(Json(service.image_generation_settings().await?))
+}
+
+pub async fn update_image_generation(State(service): State<ControlService>, Json(settings): Json<crate::store::ImageGenerationSettings>) -> Result<Json<crate::store::ImageGenerationSettings>> {
+    Ok(Json(service.set_image_generation_settings(settings).await?))
+}
 
 pub async fn get(State(service): State<ControlService>) -> Result<Json<ObservabilitySettings>> {
     Ok(Json(service.observability().await?))
@@ -35,19 +43,6 @@ pub async fn update_ports(
     Json(settings): Json<PortSettings>,
 ) -> Result<Json<PortSettings>> {
     Ok(Json(service.set_ports(settings).await?))
-}
-
-pub async fn get_external_api(
-    State(service): State<ControlService>,
-) -> Result<Json<ExternalApiSettings>> {
-    Ok(Json(service.external_api_settings().await?))
-}
-
-pub async fn update_external_api(
-    State(service): State<ControlService>,
-    Json(settings): Json<ExternalApiSettings>,
-) -> Result<Json<ExternalApiSettings>> {
-    Ok(Json(service.set_external_api_settings(settings).await?))
 }
 
 pub async fn get_storage(State(service): State<ControlService>) -> Result<Json<StatisticsStorage>> {
@@ -94,6 +89,17 @@ pub async fn update_tab(
     Ok(Json(service.set_tab_settings(settings).await?))
 }
 
+pub async fn get_theme(State(service): State<ControlService>) -> Result<Json<ThemeId>> {
+    Ok(Json(service.theme().await?))
+}
+
+pub async fn update_theme(
+    State(service): State<ControlService>,
+    Json(theme): Json<ThemeId>,
+) -> Result<Json<ThemeId>> {
+    Ok(Json(service.set_theme(theme).await?))
+}
+
 pub async fn get_desktop(State(service): State<ControlService>) -> Result<Json<DesktopSettings>> {
     Ok(Json(service.desktop_settings().await?))
 }
@@ -108,7 +114,7 @@ pub async fn update_desktop(
 
 /// Settings view for commit message generation. Empty `model_id` means 直连
 /// (forward the original Cursor RPC). A non-empty value is a configured
-/// built-in or plugin model identifier. Empty `prompt` means "use the built-in default".
+/// model identifier. Empty `prompt` means "use the built-in default".
 #[derive(Serialize)]
 pub struct CommitSettingsView {
     pub model_id: String,

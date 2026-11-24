@@ -11,5 +11,10 @@ export function isThemeId(value: string | null): value is ThemeId {
 }
 
 export function applyTheme(themeId: ThemeId) {
+  const light = themeId === "default-light";
+  const background = light ? "#fcfcfc" : "#141414";
   document.documentElement.dataset.theme = themeId;
+  document.documentElement.style.setProperty("--startup-background", background);
+  document.documentElement.style.colorScheme = light ? "light" : "dark";
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", background);
 }

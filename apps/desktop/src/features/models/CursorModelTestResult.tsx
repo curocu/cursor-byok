@@ -1,5 +1,7 @@
 import type { ModelConnectivityResult } from "../../shared/api";
+import { useState } from "react";
 import { Icon } from "../../shared/ui/Icon";
+import { Modal } from "../../shared/ui/Modal";
 import { TooltipTrigger } from "../../shared/ui/TooltipTrigger";
 import { informationOutlineIcon } from "../../shared/ui/icons";
 import styles from "./CursorModelTestResult.module.scss";
@@ -27,6 +29,10 @@ export function CursorModelTestResult({ state, testing = false, compact = false 
     return compact
       ? <span className={`${styles.compact} ${styles.idle}`}>{t("测试已取消")}</span>
       : <div className={`${styles.root} ${styles.idle}`}><span className={styles.summary}>{t("测试已取消")}</span></div>;
+  }
+
+  if (state.status === "success" && state.result.image) {
+    return <ImageTestResult image={state.result.image} duration={state.result.duration_ms} compact={compact} />;
   }
 
   const success = state.status === "success";
@@ -57,6 +63,26 @@ export function CursorModelTestResult({ state, testing = false, compact = false 
     <span className={styles.summary}>{summary}</span>
     <TooltipTrigger label={detail}><button type="button" className={styles.details}>{t("查看详情")}<Icon icon={informationOutlineIcon} size="1.1em" /></button></TooltipTrigger>
   </div>;
+}
+
+function ImageTestResult({ image, duration, compact }: {
+  image: NonNullable<ModelConnectivityResult["image"]>;
+  duration: number;
+  compact: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return <>
+    <div className={`${compact ? styles.compact : styles.root} ${styles.success}`}>
+      <span className={styles.summary}>{t("生图成功")}</span>
+      <button type="button" className={`${styles.details} ${styles.previewButton}`} onClick={() => setOpen(true)}>{t("查看图片")}</button>
+    </div>
+    <Modal wide open={open} title={t("生图测试预览")} closeLabel={t("关闭")} onClose={() => setOpen(false)}>
+      <div className={styles.preview}>
+        <img className={styles.previewImage} src={`data:${image.mime_type};base64,${image.image_data}`} alt={t("生图测试预览")} />
+        <span>{image.width} × {image.height} · {image.mime_type} · {duration} ms</span>
+      </div>
+    </Modal>
+  </>;
 }
 
 function formatSpeed(value: number) {

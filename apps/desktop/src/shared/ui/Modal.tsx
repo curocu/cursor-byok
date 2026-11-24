@@ -51,6 +51,8 @@ export function Modal({ id, open, title, children, banner, busy, wide, compact, 
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
     const onKey = (event: KeyboardEvent) => {
+      const dialogs = document.querySelectorAll('[aria-modal="true"]');
+      if (dialogs[dialogs.length - 1] !== dialog.current) return;
       if (event.key === "Escape" && !busyRef.current) {
         event.preventDefault();
         closeRef.current();

@@ -16,9 +16,9 @@ const DEFAULT_MAX_OUTPUT: u64 = 64_000;
 
 /// Builds the `ListAvailableModels` response body.
 pub fn build(models: &[ModelConfig]) -> Value {
-    let entries: Vec<Value> = models.iter().map(entry).collect();
+    let entries: Vec<Value> = models.iter().filter(|model| !model.is_image_generation()).map(entry).collect();
     let mut body = json!({ "models": entries });
-    if let Some(first) = models.first() {
+    if let Some(first) = models.iter().find(|model| !model.is_image_generation()) {
         body["defaultModel"] = json!({ "modelId": first.model_hash });
     }
     body

@@ -26,6 +26,12 @@ pub struct ModelOrder {
     pub model_hashes: Vec<String>,
 }
 
+#[derive(Default, Deserialize)]
+pub struct ModelTestInput {
+    pub image_prompt: Option<String>,
+    pub image_options: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 pub async fn list(State(service): State<ControlService>) -> Result<Json<Vec<ModelConfig>>> {
     Ok(Json(service.models().await?))
 }
@@ -66,8 +72,10 @@ pub async fn update(
 pub async fn test(
     State(service): State<ControlService>,
     Path((model_hash, test_id)): Path<(String, String)>,
+    input: Option<Json<ModelTestInput>>,
 ) -> Result<Json<ModelConnectivityResult>> {
-    Ok(Json(service.test_model(&model_hash, &test_id).await?))
+    let input = input.map(|Json(input)| input).unwrap_or_default();
+    Ok(Json(service.test_model(&model_hash, &test_id, input.image_prompt.as_deref(), input.image_options.as_ref()).await?))
 }
 
 pub async fn cancel(

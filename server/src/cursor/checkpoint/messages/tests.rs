@@ -96,6 +96,7 @@ fn cursor_wire_ids_are_projection_metadata_not_internal_message_ids() {
         message_id: "internal-assistant-id".into(),
         role: Role::Assistant,
         content: ProjectedContent::Assistant {
+            parts: Vec::new(),
             text: "done".into(),
             thinking: String::new(),
             replay_state: None,
@@ -187,6 +188,65 @@ fn cursor_user_image_uses_image_field() {
     let encoded = wire_message(&projected[0], "model", None).unwrap();
     assert_eq!(encoded["content"][1]["image"], "AQID");
     assert!(encoded["content"][1].get("data").is_none());
+}
+
+#[test]
+fn cursor_user_image_decodes_serialized_uint8array() {
+    let wire = json!({
+        "role": "user",
+        "content": [
+            {"type":"text", "text":"describe the screenshot"},
+            {
+                "type":"image",
+                "image":{"__type":"Uint8Array", "hex":"00aBff"},
+                "mimeType":"image/jpeg",
+            },
+        ],
+    });
+    let message = decode(
+        &serde_json::to_vec(&wire).unwrap(),
+        "cursor-root:screenshot".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &message.content,
+        MessageContent::Parts { parts }
+            if parts[1] == ContentPart::Image {
+                mime_type: "image/jpeg".into(),
+                data: vec![0, 171, 255],
+            }
+    ));
+    let projected = project_messages(&[message]).unwrap();
+    let encoded = wire_message(&projected[0], "model", None).unwrap();
+    let recovered = decode(
+        &serde_json::to_vec(&encoded).unwrap(),
+        "cursor-root:screenshot-replayed".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        recovered.content,
+        MessageContent::Parts { parts }
+            if parts[1] == ContentPart::Image {
+                mime_type: "image/jpeg".into(),
+                data: vec![0, 171, 255],
+            }
+    ));
+}
+
+#[test]
+fn cursor_user_image_rejects_invalid_serialized_bytes() {
+    for image in [
+        json!({"__type":"Uint8Array", "hex":"0"}),
+        json!({"__type":"Uint8Array", "hex":"zz"}),
+        json!({"__type":"Uint8Array"}),
+        json!({"__type":"Other", "hex":"00"}),
+    ] {
+        let wire = json!({
+            "role":"user",
+            "content":[{"type":"image", "image":image, "mimeType":"image/jpeg"}],
+        });
+        assert!(decode(&serde_json::to_vec(&wire).unwrap(), "invalid-image".into()).is_err());
+    }
 }
 
 #[test]

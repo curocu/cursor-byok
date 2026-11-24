@@ -75,3 +75,18 @@
     outline-offset: 2px;
   }
 }
+
+.previewButton {
+  cursor: pointer;
+}
+
+.preview {
+  display: grid;
+  gap: 12px;
+}
+
+.previewImage {
+  width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+}

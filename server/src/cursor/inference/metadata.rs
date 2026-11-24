@@ -1,6 +1,6 @@
 use crate::{
     cursor::protocol::proto::inference as pb,
-    model::{ModelConfig, ModelType},
+    model::{parse_token_count, ModelConfig, ModelType},
 };
 
 /// Prompt and tool decisions consumed by Cursor's local loop, before inference.
@@ -31,6 +31,7 @@ pub fn prompt_metadata(
         .unwrap_or_else(|| "latest".into());
     let mut policies: Vec<_> = models
         .iter()
+        .filter(|model| !model.is_image_generation())
         .map(|m| pb::RunInferenceSubagentModelPolicy {
             slug: m.model_hash.clone(),
             advertised: true,
@@ -66,6 +67,56 @@ pub fn prompt_metadata(
             })
         })
         .collect();
+    // Harness 431 (fc9681d2e171) uses its managed-local defaults only when
+    // featureFlags is absent; an explicit map replaces them rather than merging.
+    let mut feature_flags: std::collections::HashMap<_, _> = [
+        ("closeStdin", true),
+        ("disableBackgroundTaskFollowUp", false),
+        ("enableAwaitForSubagents", true),
+        ("enableBackgroundTaskProgress", true),
+        ("enableBoundedSubagentAwait", true),
+        ("enableDebugSubagent", true),
+        ("enableEmptyResponseRetry", true),
+        ("enableExploreSubagent", true),
+        ("enableReadToolNegativeOffset", true),
+        ("enableSandboxSharedBuildCache", true),
+        ("longRunningJobs", true),
+        ("nalLoopDetection", true),
+        ("subagentSupportInterrupt", true),
+        ("useClientSideSubagent", true),
+    ]
+    .into_iter()
+    .map(|(key, value)| {
+        (
+            key.into(),
+            pb::RunInferenceFlagValue {
+                value: Some(pb::run_inference_flag_value::Value::BoolValue(value)),
+            },
+        )
+    })
+    .collect();
+    for (key, value) in [
+        ("outputNotificationLimit", 1000.0),
+        // Keep the existing BYOK grace policy for Cursor's native pending-Steer
+        // preemption. Ordinary queued messages do not trigger this path.
+        ("steerPreemptIdleSampleGraceMs", 1000.0),
+        ("steerPreemptToolCallWriteGraceMs", 1000.0),
+    ] {
+        feature_flags.insert(
+            key.into(),
+            pb::RunInferenceFlagValue {
+                value: Some(pb::run_inference_flag_value::Value::NumberValue(value)),
+            },
+        );
+    }
+    feature_flags.insert(
+        "dynamicToolProfile".into(),
+        pb::RunInferenceFlagValue {
+            value: Some(pb::run_inference_flag_value::Value::StringValue(
+                "all-static".into(),
+            )),
+        },
+    );
     pb::RunInferencePromptModelMetadata {
         vendor: if anthropic { "anthropic" } else { "openai" }.into(),
         prompt_version,
@@ -88,20 +139,14 @@ pub fn prompt_metadata(
         is_gpt56: slug.contains("gpt-5-6"),
         is_codex_family: slug.contains("codex"),
         self_identity_name: "Cursor".into(),
-        feature_flags: [(
-            "dynamicToolProfile".into(),
-            pb::RunInferenceFlagValue {
-                value: Some(pb::run_inference_flag_value::Value::StringValue(
-                    "all-static".into(),
-                )),
-            },
-        )]
-        .into(),
+        feature_flags,
         reasoning_effort: selected
             .parameters
             .iter()
             .find(|p| p.id == "effort" || p.id == "reasoning")
-            .map(|p| p.value.clone())
+            .map(|p| p.value.trim())
+            .filter(|value| !matches!(*value, "default" | ""))
+            .map(str::to_owned)
             .or_else(|| {
                 configured.and_then(|m| {
                     if anthropic {
@@ -111,16 +156,35 @@ pub fn prompt_metadata(
                     }
                 })
             }),
-        agent_token_limit: configured
-            .and_then(|m| m.context_window_tokens)
-            .map(|n| n.min(i32::MAX as u64) as i32),
+        // The local loop needs the selected window for usage and compaction.
+        // With no selection or model override, the catalog defaults to 200k.
+        agent_token_limit: Some(
+            selected
+                .parameters
+                .iter()
+                .find(|p| p.id == "context")
+                .and_then(|p| parse_token_count(&p.value))
+                .filter(|tokens| *tokens > 0)
+                .or_else(|| configured.and_then(|m| m.context_window_tokens))
+                .unwrap_or(200_000)
+                .min(i32::MAX as u64) as i32,
+        ),
         // Cursor looks up every mode, including Plan while building Agent prompts.
         agent_mode_configs: ["agent", "chat", "plan", "debug", "triage", "multitask"]
             .into_iter()
             .map(|mode| pb::RunInferenceAgentModeConfig {
                 mode_id: mode.into(),
                 enable_ask_question_tool: true,
-                ..Default::default()
+                // The local loop only exposes SwitchMode for explicit targets.
+                switch_mode_tool_config: match mode {
+                    "agent" | "multitask" => Some(pb::RunInferenceSwitchModeToolConfig {
+                        target_modes: vec!["plan".into()],
+                    }),
+                    "plan" => Some(pb::RunInferenceSwitchModeToolConfig {
+                        target_modes: vec!["agent".into()],
+                    }),
+                    _ => None,
+                },
             })
             .collect(),
         ask_question_config: Some(pb::RunInferenceAskQuestionConfig {

@@ -415,7 +415,7 @@ mod tests {
     use super::*;
     use crate::model::ProviderType;
 
-    /// 插件模型不在 model_configs 中,调用记录必须照常落库并可按其稳定 ID 筛选。
+    /// 历史插件模型不在 model_configs 中,其调用记录仍可读取并按稳定 ID 筛选。
     #[tokio::test]
     async fn plugin_calls_record_without_a_model_config_row() {
         let directory = tempfile::tempdir().unwrap();

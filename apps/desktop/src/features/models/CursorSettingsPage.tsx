@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api, configuredPluginModels, type Model, type ModelInput } from "../../shared/api";
+import { api, type Model, type ModelInput } from "../../shared/api";
+import { isImageModel, readImageOptions, imageOptionsError } from "../../shared/utils/imageGeneration";
 import { CursorCaGate, CursorCaProvider, CursorModelGate, CursorModelProvider } from "./CursorGates";
 import { CursorModelCards, cursorModelGroups, type CursorModelGroup, type CursorModelGrouping } from "./CursorModelCards";
 import { CursorModelEditor, emptyCursorModelDraft, type CursorModelDraft } from "./CursorModelEditor";
@@ -20,9 +20,9 @@ import { useMessage } from "../../shared/ui/message";
 import { PageActions } from "../../shell/PageActions";
 import { appStore, useAppStore } from "../../shared/store/appStore";
 
-export function CursorSettingsPage() {
-  const { models, cursorHarness, cursorBusy, plugins } = useAppStore();
-  const navigate = useNavigate();
+export function CursorSettingsPage({ imageGeneration = false, onImageTest }: { imageGeneration?: boolean; onImageTest?: (model: Model) => void }) {
+  const { models: allModels, cursorHarness, cursorBusy } = useAppStore();
+  const models = allModels.filter((model) => isImageModel(model) === imageGeneration);
   const message = useMessage();
   const [draft, setDraft] = useState<CursorModelDraft | null>(null);
   const [editing, setEditing] = useState<Model | null>(null);
@@ -46,10 +46,8 @@ export function CursorSettingsPage() {
   const caReady = cursorHarness?.ca === "ready";
   const cursorTakenOver = cursorHarness?.settings_applied ?? false;
   const takeoverLabel = cursorTakenOver ? t("关闭接管Cursor") : t("开启接管Cursor");
-  const pluginModels = configuredPluginModels(plugins);
   const testTargets = [
-    ...models.map((model) => ({ model_hash: model.model_hash, display_name: model.display_name })),
-    ...pluginModels.map((model) => ({ model_hash: model.id, display_name: model.displayName })),
+    ...models.filter((model) => !isImageModel(model)).map((model) => ({ model_hash: model.model_hash, display_name: model.display_name })),
   ];
   const providerGroups = cursorModelGroups(models, "provider");
   const typeGroups = cursorModelGroups(models, "type");
@@ -72,7 +70,8 @@ export function CursorSettingsPage() {
   };
   const openNew = () => {
     const next = emptyCursorModelDraft();
-    next.model.sort_order = models.length + 1;
+    next.model.sort_order = allModels.length + 1;
+    if (imageGeneration) next.model.openai_endpoint = "/v1/images/generations";
     setEditing(null);
     setModelOptions([]);
     setDraft(next);
@@ -182,6 +181,10 @@ export function CursorSettingsPage() {
     }
     if (!saved) return;
     setEditing(saved);
+    if (imageGeneration) {
+      onImageTest?.(saved);
+      return;
+    }
     await testModel(saved);
     await appStore.refresh();
   };
@@ -214,7 +217,7 @@ export function CursorSettingsPage() {
     }
     const created = await appStore.createModels([{
       ...modelInput(model),
-      sort_order: models.length + 1,
+      sort_order: allModels.length + 1,
       display_name: displayName,
     }]);
     if (created) message(t("模型已复制"));
@@ -253,24 +256,25 @@ export function CursorSettingsPage() {
     }
   };
   const reorderModels = useCallback(async (modelHashes: string[]) => {
-    if (!await appStore.reorderCursorModels(modelHashes)) {
+    const ordered = [...modelHashes];
+    const combined = allModels.map((model) => isImageModel(model) === imageGeneration
+      ? ordered.shift() ?? ""
+      : model.model_hash);
+    if (!await appStore.reorderCursorModels(combined)) {
       message(appStore.getSnapshot().error || t("排序失败"));
     }
-  }, [message]);
+  }, [allModels, imageGeneration, message]);
 
   const list = <CursorModelCards
     models={models}
-    pluginModels={pluginModels}
     grouping={grouping}
     disabled={cursorBusy}
     testingModelHashes={testingModelHashes}
     testResults={modelTestResults}
-    onTest={(model) => void testModel(model)}
+    onTest={(model) => { if (imageGeneration) onImageTest?.(model); else void testModel(model); }}
     onEdit={openEdit}
     onDuplicate={(model) => void duplicateModel(model)}
     onDelete={setDeleting}
-    onTestPluginModel={(model) => void testModel({ model_hash: model.id, display_name: model.displayName })}
-    onPluginSettings={() => navigate("/plugins")}
     onReorder={reorderModels}
     onGroupSettings={openGroupSettings}
   />;
@@ -284,23 +288,34 @@ export function CursorSettingsPage() {
     setCaCommand(null);
     setWaitingForCaRefresh(true);
   };
-  const content = <CursorCaProvider><CursorCaGate busy={cursorBusy} waitingForRefresh={waitingForCaRefresh} onInitialize={() => void initializeCa()} onRefresh={() => void refreshCa()}>
-    <div className={styles.page}>
-      <LegacyModelImport>{({ busy: importingLegacyModels, previewing, open }) =>
+  const content = <div className={styles.page}>
+      {imageGeneration ? (models.length ? list : <div className={styles.gate}>
+        <strong>{t("还没有生图模型")}</strong>
+        <button type="button" className={controls.primary} disabled={cursorBusy} onClick={openNew}>{t("添加生图模型")}</button>
+      </div>) : <LegacyModelImport>{({ busy: importingLegacyModels, previewing, open }) =>
         <CursorModelProvider><CursorModelGate busy={cursorBusy || importingLegacyModels} previewingImport={previewing} onAdd={openNew} onImport={open}>{list}</CursorModelGate></CursorModelProvider>
-      }</LegacyModelImport>
-    </div>
-  </CursorCaGate></CursorCaProvider>;
+      }</LegacyModelImport>}
+    </div>;
 
   const editorTestState = editing ? modelTestResults.get(editing.model_hash) : undefined;
   const editorTesting = Boolean(editing && testingModelHashes.has(editing.model_hash));
   const activeGroups = grouping === "provider" ? providerGroups : typeGroups;
-  const pluginSectionHeight = pluginModels.length > 0 ? 60 + pluginModels.length * 56 : 0;
   const estimatedModelHeight = grouping === "flat"
-    ? Math.max(380, Math.ceil(models.length / 3) * 196 + pluginSectionHeight)
-    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20 + pluginSectionHeight);
+    ? Math.max(380, Math.ceil(models.length / 3) * 196)
+    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20);
+
+  const groupingActions = models.length > 0 && <div className={styles.groupActions} role="group" aria-label={t("操作")}>
+    <button type="button" aria-pressed={grouping === "flat"} onClick={() => setGrouping("flat")}>{t("默认平铺")}</button>
+    {canGroupByProvider && <button type="button" aria-pressed={grouping === "provider"} onClick={() => setGrouping("provider")}>{t("按供应商")}</button>}
+    {canGroupByType && <button type="button" aria-pressed={grouping === "type"} onClick={() => setGrouping("type")}>{t("按类型")}</button>}
+    {!imageGeneration && <button type="button" disabled={cursorBusy || (!batchTesting && testingModelHashes.size > 0)} onClick={() => void (batchTesting ? cancelAllModelTests() : testAllModels())}>{batchTesting ? t("取消全部测试") : t("一键测试")}</button>}
+  </div>;
 
   return <>
+    {imageGeneration ? <div className={styles.page}>
+      <div className={styles.imageToolbar}>{groupingActions}<button type="button" className={controls.primary} disabled={cursorBusy} onClick={openNew}>{t("添加生图模型")}</button></div>
+      {content}
+    </div> : <>
     <PageActions position="left">
       <div className={styles.takeoverActions}>
         <span className={styles.takeoverStatus}>{cursorTakenOver ? t("已接管") : t("未接管")}</span>
@@ -315,16 +330,12 @@ export function CursorSettingsPage() {
             }}
           />
         </TooltipTrigger>
-        {testTargets.length > 0 && <div className={styles.groupActions} role="group" aria-label={t("操作")}>
-          <button type="button" aria-pressed={grouping === "flat"} onClick={() => setGrouping("flat")}>{t("默认平铺")}</button>
-          {canGroupByProvider && <button type="button" aria-pressed={grouping === "provider"} onClick={() => setGrouping("provider")}>{t("按供应商")}</button>}
-          {canGroupByType && <button type="button" aria-pressed={grouping === "type"} onClick={() => setGrouping("type")}>{t("按类型")}</button>}
-          <button type="button" disabled={cursorBusy || (!batchTesting && testingModelHashes.size > 0)} onClick={() => void (batchTesting ? cancelAllModelTests() : testAllModels())}>{batchTesting ? t("取消全部测试") : t("一键测试")}</button>
-        </div>}
+        {groupingActions}
       </div>
     </PageActions>
     <PageActions><TooltipTrigger label={caReady ? t("添加模型") : t("请先初始化 CA")}><button className={controls.iconButton} aria-label={t("添加模型")} disabled={!caReady || cursorBusy} onClick={openNew}><Icon icon={addIcon} size="1.1em" /></button></TooltipTrigger></PageActions>
-    <PageContent title="Cursor" sections={[{ key: "cursor-settings", estimatedHeight: estimatedModelHeight, content }]} />
+    <PageContent title="Cursor" sections={[{ key: "cursor-settings", estimatedHeight: estimatedModelHeight, content: <CursorCaProvider><CursorCaGate busy={cursorBusy} waitingForRefresh={waitingForCaRefresh} onInitialize={() => void initializeCa()} onRefresh={() => void refreshCa()}>{content}</CursorCaGate></CursorCaProvider> }]} />
+    </>}
     <ConfirmDialog
       open={confirmDisableTakeover}
       title={t("关闭接管Cursor？")}
@@ -338,9 +349,9 @@ export function CursorSettingsPage() {
     >
       <p>{t("关闭后将移除 Cursor 本地代理配置。如果你需要登陆官方账号，通常不需要关闭操作，推荐直接登陆你的账号即可(byok模型与官方账号的模型已支持无缝衔接)，是否继续关闭并清理代理？")}</p>
     </ConfirmDialog>
-    <Modal fullHeight open={draft !== null} title={editing ? t("编辑模型") : t("添加模型")} banner={draft && (editorTesting || editorTestState) ? <CursorModelTestResult state={editorTestState} testing={editorTesting} /> : undefined} busy={cursorBusy || savingAndTesting} onClose={() => { if (editing && editorTesting) void cancelModelTest(editing.model_hash); setDraft(null); setEditing(null); }} onSubmit={() => void save()} submitLabel={t("保存")} secondaryAction={<button type="button" className={controls.secondary} disabled={cursorBusy || savingAndTesting} onClick={() => void (editorTesting && editing ? cancelModelTest(editing.model_hash) : saveAndTest())}>{savingAndTesting ? t("处理中…") : editorTesting ? t("取消测试") : t("保存并测试")}</button>}>
+    <Modal fullHeight open={draft !== null} title={editing ? t("编辑模型") : t("添加模型")} banner={draft && (editorTesting || editorTestState) ? <CursorModelTestResult state={editorTestState} testing={editorTesting} /> : undefined} busy={cursorBusy || savingAndTesting} onClose={() => { if (editing && editorTesting) void cancelModelTest(editing.model_hash); setDraft(null); setEditing(null); }} onSubmit={() => void save()} submitLabel={t("保存")} secondaryAction={<button type="button" className={controls.secondary} disabled={cursorBusy || savingAndTesting} onClick={() => void (editorTesting && editing ? cancelModelTest(editing.model_hash) : saveAndTest())}>{savingAndTesting ? t("处理中…") : editorTesting ? t("取消测试") : draft && isImageModel(draft.model) ? t("保存并生图测试") : t("保存并测试")}</button>}>
       {draft && <>
-        <CursorModelEditor draft={draft} modelOptions={modelOptions} discovering={discovering} onChange={setDraft} onDiscover={discover} />
+        <CursorModelEditor imageGeneration={imageGeneration} draft={draft} modelOptions={modelOptions} discovering={discovering} onChange={setDraft} onDiscover={discover} />
       </>}
     </Modal>
     <ConfirmDialog open={caCommand !== null} title={t("安装本地 CA")} cancelLabel={t("关闭")} confirmLabel={t("打开终端")} onCancel={() => setCaCommand(null)} onConfirm={openCaTerminal}>
@@ -387,6 +398,18 @@ function draftInput(draft: CursorModelDraft): ModelInput {
     custom_headers: parseHeaders(draft.customHeadersText),
     anthropic_extra_params: parseObject(draft.anthropicExtraParamsText, t("Anthropic 额外参数")),
   };
+  if (isImageModel(model)) {
+    if (model.openai_extra_params_enabled) {
+      const error = imageOptionsError(readImageOptions(model.openai_extra_params, model.openai_endpoint));
+      if (error) throw new Error(error);
+    }
+    model.reasoning_effort = null;
+    model.context_window_tokens = null;
+    model.max_completion_tokens = null;
+    model.anthropic_max_tokens = null;
+    model.anthropic_thinking_effort = null;
+    model.thinking_budget_tokens = null;
+  }
   if (!model.display_name || !model.base_url || !model.api_key || !model.tooltip_data || !model.model_id) throw new Error(t("服务器地址或完整请求 URL、API Key、模型名称、显示名称和备注不能为空"));
   for (const [label, value] of [[t("上下文窗口 Token"), model.context_window_tokens], [t("最大输出 Token"), model.type === "openai" ? model.max_completion_tokens : model.anthropic_max_tokens], [t("思考预算 Token"), model.thinking_budget_tokens]] as const) {
     if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) throw new Error(t("{label} 必须是大于 0 的整数", { label }));

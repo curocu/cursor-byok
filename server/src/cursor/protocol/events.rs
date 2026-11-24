@@ -42,6 +42,7 @@ pub fn response_event(
         | ModelEvent::TextEnd
         | ModelEvent::ThinkingStart
         | ModelEvent::ThinkingEnd
+        | ModelEvent::ReasoningReplayState(_)
         | ModelEvent::ProviderReplayState(_)
         | ModelEvent::Usage(_)
         | ModelEvent::Done(_) => return Ok(None),

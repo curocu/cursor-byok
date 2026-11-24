@@ -2,9 +2,9 @@
 mod ads;
 mod calls;
 mod harness;
+mod image_options;
 mod models;
 mod overview;
-mod plugins;
 mod service;
 mod settings;
 
@@ -111,6 +111,7 @@ fn proxy_error(error: impl std::fmt::Display) -> Response<Body> {
 
 pub fn api_router(service: ControlService) -> Router {
     Router::new()
+        .route("/__byok-api__/api/settings/image-generation", get(settings::get_image_generation).put(settings::update_image_generation))
         .route("/__byok-api__/api/promotions", get(ads::get))
         .route(
             "/__byok-api__/api/promotions/images/{file_name}",
@@ -141,53 +142,6 @@ pub fn api_router(service: ControlService) -> Router {
         )
         .route("/__byok-api__/api/llm-calls", get(calls::list))
         .route("/__byok-api__/api/llm-calls/{call_id}", get(calls::detail))
-        .route("/__byok-api__/api/plugins", get(plugins::list))
-        .route(
-            "/__byok-api__/api/plugins/runtime",
-            get(plugins::runtime_status)
-                .post(plugins::initialize_runtime)
-                .delete(plugins::cancel_runtime_initialization),
-        )
-        .route(
-            "/__byok-api__/api/plugins/oauth/{session_id}/poll",
-            post(plugins::oauth_poll),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}",
-            axum::routing::delete(plugins::remove),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/add/{method_id}/begin",
-            post(plugins::oauth_begin),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/import",
-            post(plugins::import),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/export",
-            get(plugins::export_resources),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}",
-            axum::routing::delete(plugins::delete_resource),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}/actions/{action_id}",
-            post(plugins::action),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}/refresh",
-            post(plugins::refresh_resource),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/providers/{provider_id}/models/sync",
-            post(plugins::sync_models),
-        )
-        .route(
-            "/__byok-api__/api/plugins/{plugin_id}/providers/{provider_id}/models/enabled",
-            put(plugins::set_model_enabled),
-        )
         .route(
             "/__byok-api__/api/settings/observability",
             get(settings::get).put(settings::update),
@@ -195,10 +149,6 @@ pub fn api_router(service: ControlService) -> Router {
         .route(
             "/__byok-api__/api/settings/ports",
             get(settings::get_ports).put(settings::update_ports),
-        )
-        .route(
-            "/__byok-api__/api/settings/external-api",
-            get(settings::get_external_api).put(settings::update_external_api),
         )
         .route(
             "/__byok-api__/api/settings/storage/statistics",
@@ -211,6 +161,10 @@ pub fn api_router(service: ControlService) -> Router {
         .route(
             "/__byok-api__/api/settings/tab",
             get(settings::get_tab).put(settings::update_tab),
+        )
+        .route(
+            "/__byok-api__/api/settings/theme",
+            get(settings::get_theme).put(settings::update_theme),
         )
         .route(
             "/__byok-api__/api/settings/desktop",
